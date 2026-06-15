@@ -11,7 +11,7 @@ model against the benchmark. The dataset itself is available from the
 ## Installation
 
 ```bash
-pip install git+https://github.com/carlanomaly/carlanomaly
+pip install git+https://github.com/carlanomaly/devkit
 ```
 
 Requires Python ≥ 3.10 and PyTorch.

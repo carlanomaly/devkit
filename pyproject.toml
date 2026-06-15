@@ -22,7 +22,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://carlanomaly.github.io"
-Repository = "https://github.com/carlanomaly/carlanomaly"
+Repository = "https://github.com/carlanomaly/devkit"
 
 [tool.hatch.build.targets.wheel]
 packages = ["carlanomaly"]
