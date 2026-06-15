@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "carlanomaly"
+version = "0.1.0"
+description = "Data loading and evaluation framework for the CarlAnomaly multimodal anomaly-detection benchmark."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Konstantin Kirchheim", email = "k.kirchheim@gmx.net" }]
+keywords = ["anomaly-detection", "autonomous-driving", "carla", "benchmark", "multimodal"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",      # feather (.feather) support for pandas
+    "Pillow",
+    "torch",
+    "torchmetrics",
+]
+
+[project.urls]
+Homepage = "https://carlanomaly.github.io"
+Repository = "https://github.com/carlanomaly/carlanomaly"
+
+[tool.hatch.build.targets.wheel]
+packages = ["carlanomaly"]
