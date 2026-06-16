@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import List
 
 import pandas as pd
 import torch
 
-from ..index import ScenarioIndex
 from ._base import AtomicDataset
 
 
@@ -15,15 +14,12 @@ class AnomalyLiDARDataset(AtomicDataset):
     Returns a ``List[BoolTensor]`` of length T.  Each tensor has shape
     ``(N_points,)`` matching the corresponding point cloud.  For the train
     split, returns all-False tensors sized to match the actual point cloud.
+
+    With ``download=True`` the ``lidar`` part (plus ``base``) is fetched
+    automatically.
     """
 
-    def __init__(
-        self,
-        index: ScenarioIndex,
-        transform: Optional[Callable] = None,
-    ) -> None:
-        super().__init__(index, transform)
-        self._is_train = index.split == "train"
+    modality = "anomaly_lidar"
 
     def __getitem__(self, idx: int) -> List[torch.Tensor]:
         rec, _ = self._index[idx]

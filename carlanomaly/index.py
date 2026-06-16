@@ -32,9 +32,10 @@ class ScenarioRecord:
 class ScenarioIndex:
     """Discovers scenarios and builds a flat sliding-window index.
 
-    All atomic datasets share the same ``ScenarioIndex`` instance so that
-    ``dataset_a[i]`` and ``dataset_b[i]`` always refer to the same scenario
-    and frame window.
+    Datasets construct this internally from the ``root``/``split`` you pass
+    them, so you normally never instantiate it directly.  Datasets built with
+    the same parameters produce identical indices, so ``dataset_a[i]`` and
+    ``dataset_b[i]`` always refer to the same scenario and frame window.
 
     Parameters
     ----------
@@ -52,6 +53,17 @@ class ScenarioIndex:
         Restrict test anomaly clips to a subset of types.
     towns:
         Restrict to scenarios from specific towns.
+    download:
+        If ``True``, download and extract the required dataset archives into
+        ``root`` (via :func:`carlanomaly.download.ensure_parts`) before
+        discovery.  Idempotent: already-present archives are skipped.
+    parts:
+        Which dataset parts to download when ``download=True``.  Defaults to
+        ``["base"]`` (the minimum needed for scenario discovery).  Add more
+        (e.g. ``"lidar"``, ``"depth"``, ``"camera-extended"``) for the
+        modalities you intend to load.
+    download_verify:
+        Verify SHA-256 checksums of downloaded archives (default ``True``).
     """
 
     def __init__(
@@ -62,6 +74,9 @@ class ScenarioIndex:
         stride: Optional[int] = None,
         anomaly_types: Optional[Sequence[str]] = None,
         towns: Optional[Sequence[str]] = None,
+        download: bool = False,
+        parts: Optional[Sequence[str]] = None,
+        download_verify: bool = True,
     ) -> None:
         valid_splits = ("train", "test_normal", "test_anomaly", "test")
         if split not in valid_splits:
@@ -73,6 +88,16 @@ class ScenarioIndex:
         self.stride = stride if stride is not None else clip_len
         self.anomaly_types = set(anomaly_types) if anomaly_types else None
         self.towns = set(towns) if towns else None
+
+        if download:
+            from .download import ensure_parts, splits_for
+
+            ensure_parts(
+                self.root,
+                list(parts) if parts else ["base"],
+                splits_for(split),
+                verify=download_verify,
+            )
 
         self._records: List[ScenarioRecord] = self._discover()
         self._index: List[Tuple[int, int]] = self._build_index()

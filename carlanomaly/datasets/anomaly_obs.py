@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
-
 import numpy as np
 import pandas as pd
 import torch
 
-from ..index import ScenarioIndex
 from ._base import AtomicDataset
 
 
@@ -17,13 +14,7 @@ class AnomalyObservationDataset(AtomicDataset):
     file exists), returns all-False.
     """
 
-    def __init__(
-        self,
-        index: ScenarioIndex,
-        transform: Optional[Callable] = None,
-    ) -> None:
-        super().__init__(index, transform)
-        self._is_train = index.split == "train"
+    modality = "anomaly_obs"
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]

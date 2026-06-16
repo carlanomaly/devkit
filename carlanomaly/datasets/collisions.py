@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import List
 
 import pandas as pd
 
-from ..index import ScenarioIndex
 from ._base import AtomicDataset
 
 
@@ -17,12 +16,7 @@ class CollisionsDataset(AtomicDataset):
     Most frames have no collisions (empty DataFrame).
     """
 
-    def __init__(
-        self,
-        index: ScenarioIndex,
-        transform: Optional[Callable] = None,
-    ) -> None:
-        super().__init__(index, transform)
+    modality = "collisions"
 
     def __getitem__(self, idx: int) -> List[pd.DataFrame]:
         rec, _ = self._index[idx]

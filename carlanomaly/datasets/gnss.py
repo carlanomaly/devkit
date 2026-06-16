@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
-
 import torch
 
-from ..index import ScenarioIndex
 from ._base import AtomicDataset
 
 
@@ -14,12 +11,7 @@ class GNSSDataset(AtomicDataset):
     Returns a ``FloatTensor (T, 3)`` with columns: altitude, latitude, longitude.
     """
 
-    def __init__(
-        self,
-        index: ScenarioIndex,
-        transform: Optional[Callable] = None,
-    ) -> None:
-        super().__init__(index, transform)
+    modality = "gnss"
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]

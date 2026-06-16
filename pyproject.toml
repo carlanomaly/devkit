@@ -20,9 +20,25 @@ dependencies = [
     "torchmetrics",
 ]
 
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7",
+    "furo",
+    "sphinx-autodoc-typehints",
+]
+test = [
+    "pytest>=7",
+]
+
+[project.scripts]
+carlanomaly-download = "carlanomaly.download:main"
+
 [project.urls]
 Homepage = "https://carlanomaly.github.io"
 Repository = "https://github.com/carlanomaly/devkit"
 
 [tool.hatch.build.targets.wheel]
 packages = ["carlanomaly"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

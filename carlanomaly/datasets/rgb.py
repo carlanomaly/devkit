@@ -1,29 +1,44 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 from PIL import Image
 
 from ..index import ScenarioIndex
-from ._base import AtomicDataset
+from ._base import AtomicDataset, PathLike
 
 
 class RGBDataset(AtomicDataset):
     """Per-frame RGB images from a single camera.
 
     Returns a ``FloatTensor (T, 3, H, W)`` in ``[0, 1]``.
+
+    With ``download=True`` the required archive parts are fetched into ``root``
+    automatically (``front`` lives in ``base``; other directions add
+    ``camera-extended``).  Remaining keyword arguments (``clip_len``,
+    ``stride``, ``parts``, ...) are forwarded to
+    :class:`~carlanomaly.index.ScenarioIndex`.
     """
+
+    modality = "rgb"
 
     def __init__(
         self,
-        index: ScenarioIndex,
+        root: Optional[PathLike] = None,
+        split: str = "train",
         direction: str = "front",
+        *,
         transform: Optional[Callable] = None,
+        index: Optional[ScenarioIndex] = None,
+        download: bool = False,
+        **index_kwargs: Any,
     ) -> None:
-        super().__init__(index, transform)
-        self.direction = direction
+        super().__init__(
+            root, split, direction=direction, transform=transform,
+            index=index, download=download, **index_kwargs,
+        )
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]

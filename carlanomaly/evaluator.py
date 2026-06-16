@@ -3,26 +3,37 @@
 Evaluation is split into four independent tiers, each a pure metric
 calculator that loads its own ground-truth labels from disk.  The caller
 only ever provides anomaly *scores* plus identifiers (``scenario_id`` and
-``frame_id``); all reduction (pixel/point -> frame) and multi-sensor fusion
-is the caller's responsibility.
+``frame_id``); reducing pixel/point scores to frame scores and fusing
+multiple sensors is the caller's responsibility.
+
+Identifiers
+-----------
+``scenario_id`` is the filesystem path to the scenario directory (the value
+the datasets expose under the same key).  Evaluators use it both to locate a
+scenario's label files and to parse its anomaly type and town from the path,
+so it must follow the on-disk layout, e.g.
+``.../test/anomaly/{town}/{anomaly_type}/{run}`` or
+``.../test/normal/{town}/{run}``.  ``frame_id`` is the integer frame number,
+used to index per-frame labels and to build per-frame label paths
+(``{frame_id:06d}.png`` / ``.feather``).
 
 Tiers
 -----
-- :class:`PixelEvaluator` / :class:`PointEvaluator` — spatial metrics within
-  a frame (AUROC, AUPR, FPR@95TPR), computed per frame then averaged.
-- :class:`SensorEvaluator` — frame-level AUROC against sensor-specific labels
+- :class:`PixelEvaluator` / :class:`PointEvaluator`: spatial metrics (AUROC,
+  AUPR, FPR@95TPR) pooled over every evaluated pixel/point in the split
+  (anomalous frames, anomaly-free frames, and normal scenarios alike) using
+  bounded-memory streaming histograms.
+- :class:`SensorEvaluator`: frame-level AUROC against sensor-specific labels
   (``anomaly-{sensor}/sensor.feather``).
-- :class:`ObservationEvaluator` — frame-level AUROC against scenario-level
+- :class:`ObservationEvaluator`: frame-level AUROC against observation-level
   labels (``anomaly-observation.feather``).
-- :class:`ScenarioEvaluator` — one score per scenario; label inferred from the
+- :class:`ScenarioEvaluator`: one score per scenario; label inferred from the
   scenario path.
-
-Anomaly type is parsed from the ``scenario_id`` path so per-type breakdowns
-require no extra argument.
 """
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 from collections import defaultdict
@@ -34,7 +45,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
+from torchmetrics.classification import BinaryAUROC
 
 from .index import CAMERAS
 
@@ -105,26 +116,6 @@ def _auroc(scores: Sequence[float], labels: Sequence[bool]) -> float:
     return metric.compute().item()
 
 
-def _spatial_metrics(scores: torch.Tensor, labels: torch.Tensor) -> Dict[str, float]:
-    """AUROC, AUPR, FPR@95TPR for a single frame's flattened elements.
-
-    Runs on whatever device ``scores`` lives on (kept on-GPU for the large
-    per-frame sorts) — ``labels`` is moved to match.
-    """
-    device = scores.device
-    labels = labels.to(device)
-    labels_long = labels.long()
-    auroc = BinaryAUROC().to(device)
-    auroc.update(scores, labels_long)
-    aupr = BinaryAveragePrecision().to(device)
-    aupr.update(scores, labels_long)
-    return {
-        "auroc": auroc.compute().item(),
-        "aupr": aupr.compute().item(),
-        "fpr95": _fpr_at_tpr(scores, labels),
-    }
-
-
 def _as_float_list(scores: Any) -> List[float]:
     """Coerce a batch of scalar scores (tensor/array/sequence) to a float list.
 
@@ -136,7 +127,7 @@ def _as_float_list(scores: Any) -> List[float]:
         if t.ndim != 1:
             raise ValueError(
                 f"expected a 1-D batch of scalar scores, got tensor with shape "
-                f"{tuple(t.shape)} — reduce spatial scores to per-frame scalars first"
+                f"{tuple(t.shape)}; reduce spatial scores to per-frame scalars first"
             )
         return t.tolist()
     if isinstance(scores, np.ndarray):
@@ -157,43 +148,144 @@ def _as_float_list(scores: Any) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# Tier 1: Pixel / Point — spatial metrics within a frame
+# Tier 1: Pixel / Point: pooled spatial metrics over the whole split
 # ---------------------------------------------------------------------------
 
+#: |score| beyond this saturates the default ``asinh`` histogram range.
+_ASINH_MAX_SCORE = 1e6
+#: Bins for the global / per-type histograms (the primary, high-resolution view).
+_DEFAULT_N_BINS = 65536
+#: Bins for per-scenario histograms (a coarser secondary diagnostic).
+_DEFAULT_SCENARIO_BINS = 4096
 
-_SpatialResult = Optional[Tuple[float, float, float, Optional[str]]]
+#: Anything accepted as a monotonic score transform applied before binning.
+ScoreTransform = Callable[[torch.Tensor], torch.Tensor]
+
+
+def _resolve_binning(
+    score_transform: Optional[ScoreTransform],
+    score_range: Optional[Tuple[float, float]],
+) -> Tuple[ScoreTransform, float, float]:
+    """Return ``(transform, lo, hi)`` describing the histogram binning.
+
+    With neither argument given, scores are binned over ``asinh(score)`` across
+    a wide range, so unbounded scores (MaxLogit, MSE) need no per-model tuning.
+    ``asinh`` is linear near 0 and logarithmic in the tails, so (unlike a
+    sigmoid) it never saturates and preserves tail resolution where FPR95 lives.
+    AUROC/AUPR/FPR95 are rank-based, so any strictly monotonic transform leaves
+    their true values unchanged; binning only trades within-bin resolution.
+    """
+    if score_transform is None and score_range is None:
+        m = math.asinh(_ASINH_MAX_SCORE)
+        return torch.asinh, -m, m
+    if score_transform is None:
+        assert score_range is not None
+        lo, hi = score_range
+        return (lambda x: x), float(lo), float(hi)
+    lo, hi = score_range if score_range is not None else (0.0, 1.0)
+    return score_transform, float(lo), float(hi)
+
+
+def _bin_indices(
+    scores: torch.Tensor,
+    transform: ScoreTransform,
+    lo: float,
+    hi: float,
+    n_bins: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Map scores to ``[0, n_bins)`` bin indices; flag values outside ``[lo, hi]``."""
+    t = transform(scores)
+    idx = ((t - lo) / (hi - lo) * n_bins).floor().long()
+    clamped = (idx < 0) | (idx >= n_bins)
+    return idx.clamp_(0, n_bins - 1), clamped
+
+
+def _pooled_metrics(h_pos: torch.Tensor, h_neg: torch.Tensor) -> Dict[str, float]:
+    """AUROC / AUPR / FPR@95TPR from positive/negative score histograms.
+
+    Bins are ordered low→high score. Returns NaN for a degenerate
+    (single-class) histogram, mirroring :func:`_auroc`.
+    """
+    h_pos = h_pos.double()
+    h_neg = h_neg.double()
+    n_pos = h_pos.sum()
+    n_neg = h_neg.sum()
+    if n_pos == 0 or n_neg == 0:
+        return {"auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan")}
+
+    # Reverse-cumulative: tp[b] = #positives in bins >= b (i.e. threshold at bin b).
+    tp = torch.flip(torch.cumsum(torch.flip(h_pos, [0]), 0), [0])
+    fp = torch.flip(torch.cumsum(torch.flip(h_neg, [0]), 0), [0])
+    tpr = tp / n_pos
+    fpr = fp / n_neg
+
+    # ROC: sweep threshold from above the top bin (0, 0) down to below bin 0 (1, 1).
+    zero = torch.zeros(1, dtype=torch.double)
+    tpr_curve = torch.cat([zero, torch.flip(tpr, [0])])
+    fpr_curve = torch.cat([zero, torch.flip(fpr, [0])])
+    auroc = torch.trapz(tpr_curve, fpr_curve).item()
+
+    # AUPR as step-interpolated average precision (torchmetrics/sklearn convention).
+    precision = tp / (tp + fp).clamp(min=1.0)
+    rec_f = torch.flip(tpr, [0])
+    prec_f = torch.flip(precision, [0])
+    rec_prev = torch.cat([zero, rec_f[:-1]])
+    aupr = ((rec_f - rec_prev) * prec_f).sum().item()
+
+    # FPR at the highest threshold still reaching TPR >= 0.95 (bin 0 always does).
+    b_star = int((tpr >= 0.95).nonzero().max().item())
+    fpr95 = (fp[b_star] / n_neg).item()
+
+    return {"auroc": auroc, "aupr": aupr, "fpr95": fpr95}
 
 
 class _SpatialEvaluator:
-    """Shared logic for per-frame spatial metrics, averaged across frames.
+    """Pooled per-element spatial metrics over the entire evaluated split.
 
-    Label loading (PNG/feather decode) and metric computation run on a pool of
-    worker threads so they overlap the GPU's next forward pass instead of
-    blocking it.  ``update()`` only does a one-shot GPU->CPU copy of the batch's
-    scores and submits per-frame tasks; ``compute()`` is the join point — it
-    drains every outstanding future before aggregating.  No caller-side
-    lifecycle call is required: once drained the worker threads sit idle and are
-    reaped automatically at interpreter exit.
+    Unlike a per-frame macro-average, every pixel/point (from anomalous frames,
+    anomaly-free frames, and normal scenarios alike) enters a single pooled
+    binary problem.  This removes the selection bias of conditioning the negative
+    distribution on "the frame contains an anomaly" (see ``plan.md`` §3).
 
-    Only frames with at least one positive label contribute.
+    Scores are accumulated into bounded-memory score histograms; label loading
+    (PNG/feather decode) and binning run on a pool of worker threads so they
+    overlap the GPU's next forward pass.  ``update()`` submits per-frame tasks
+    and ``compute()`` joins them, draining every outstanding future before
+    aggregating.  Three views are derived from one set of histograms:
+
+    - **global** pooled AUROC/AUPR/FPR95 (the primary metric);
+    - **by_type** pooled metrics, grouped by anomaly type;
+    - **scenario_macro**: per-scenario metrics averaged over scenarios that
+      contain positives (an equal-per-scenario secondary diagnostic, §5).
+
+    See :class:`PixelEvaluator` for the constructor parameters.
     """
 
     def __init__(
         self,
         num_workers: int = _DEFAULT_WORKERS,
         max_inflight: int = _DEFAULT_MAX_INFLIGHT,
+        *,
+        n_bins: int = _DEFAULT_N_BINS,
+        scenario_bins: int = _DEFAULT_SCENARIO_BINS,
+        score_transform: Optional[ScoreTransform] = None,
+        score_range: Optional[Tuple[float, float]] = None,
     ) -> None:
-        self._aurocs: List[float] = []
-        self._auprs: List[float] = []
-        self._fpr95s: List[float] = []
-        self._types: List[Optional[str]] = []
+        if n_bins % scenario_bins != 0:
+            raise ValueError(
+                f"n_bins ({n_bins}) must be a multiple of scenario_bins ({scenario_bins})"
+            )
+        self._n_bins = n_bins
+        self._scenario_bins = scenario_bins
+        self._transform, self._lo, self._hi = _resolve_binning(score_transform, score_range)
+        # key -> [pos_hist, neg_hist]; type key None == normal scenarios.
+        self._by_type: Dict[Optional[str], List[torch.Tensor]] = {}
+        self._by_scenario: Dict[str, List[torch.Tensor]] = {}
+        self._n_clamped = 0
+        self._n_total = 0
         self._executor = ThreadPoolExecutor(max_workers=num_workers)
         self._futures: List[Future] = []
         self._sem = threading.Semaphore(max_inflight)
-        # Dedicated stream for worker metric ops so they don't share the
-        # default stream with the model forward — keeps main-thread syncs from
-        # waiting behind queued metric work.  Created lazily on first CUDA frame.
-        self._metric_stream: Optional[torch.cuda.Stream] = None
 
     def _submit(
         self,
@@ -201,86 +293,101 @@ class _SpatialEvaluator:
         load_labels: Callable[[], torch.Tensor],
         scenario_id: str,
     ) -> None:
-        """Queue one frame's label-load + metric computation on a worker thread.
+        """Queue one frame's label-load + histogram binning on a worker thread.
 
         ``scores`` stays on its source device (the model's GPU); the worker
-        decodes the label file on the CPU (parallel I/O, GIL released) and runs
-        the metric on that device — ``_spatial_metrics`` uploads the labels to
-        match.  Blocks if ``max_inflight`` frames are already queued
-        (backpressure), bounding both host work and retained GPU score tensors.
-
-        For CUDA scores the metric runs on a dedicated stream.  ``scores`` was
-        produced on the caller's (default) stream, so we record an event here and
-        have the metric stream wait on it — this is the cross-stream handoff that
-        keeps the read correctly ordered after the producing clone.  The worker's
-        ``_spatial_metrics`` ends in ``.item()`` syncs, so all metric ops finish
-        before the closure drops its ``scores`` ref — no ``record_stream`` needed.
+        decodes the label file on the CPU (parallel I/O, GIL released), bins both
+        classes, and returns small ``n_bins``-length count tensors.  Blocks if
+        ``max_inflight`` frames are already queued (backpressure), bounding both
+        host work and retained GPU score tensors.  Every frame contributes,
+        including frames with no positive labels (they are pure-negative pools).
         """
         self._sem.acquire()
         atype = _parse_anomaly_type(scenario_id)
+        n_bins = self._n_bins
 
-        event: Optional[torch.cuda.Event] = None
-        if scores.is_cuda:
-            if self._metric_stream is None:
-                self._metric_stream = torch.cuda.Stream(device=scores.device)
-            event = torch.cuda.Event()
-            event.record()  # captures the producing op on the caller's stream
-
-        def task() -> _SpatialResult:
+        def task() -> Tuple[torch.Tensor, torch.Tensor, int, Optional[str], str]:
             try:
-                labels = load_labels()
-                if not labels.any():
-                    return None
-                if event is not None:
-                    with torch.cuda.stream(self._metric_stream):
-                        self._metric_stream.wait_event(event)
-                        m = _spatial_metrics(scores, labels)
-                else:
-                    m = _spatial_metrics(scores, labels)
-                return m["auroc"], m["aupr"], m["fpr95"], atype
+                labels = load_labels().reshape(-1).bool().to(scores.device)
+                idx, clamped = _bin_indices(scores, self._transform, self._lo, self._hi, n_bins)
+                pos = torch.bincount(idx[labels], minlength=n_bins).cpu()
+                neg = torch.bincount(idx[~labels], minlength=n_bins).cpu()
+                return pos, neg, int(clamped.sum().item()), atype, scenario_id
             finally:
                 self._sem.release()
 
         self._futures.append(self._executor.submit(task))
 
+    @staticmethod
+    def _accumulate(
+        store: Dict[Any, List[torch.Tensor]], key: Any,
+        pos: torch.Tensor, neg: torch.Tensor, n_bins: int,
+    ) -> None:
+        if key not in store:
+            store[key] = [
+                torch.zeros(n_bins, dtype=torch.int64),
+                torch.zeros(n_bins, dtype=torch.int64),
+            ]
+        store[key][0].add_(pos)
+        store[key][1].add_(neg)
+
     def _drain(self) -> None:
-        """Wait for every queued frame, collecting results in submission order.
+        """Wait for every queued frame, accumulating counts in submission order.
 
         ``Future.result()`` re-raises any exception a worker hit (e.g. a corrupt
         mask), so failures surface here rather than being silently dropped.
         """
+        group = self._n_bins // self._scenario_bins
         for fut in self._futures:
-            r = fut.result()
-            if r is None:
-                continue
-            auroc, aupr, fpr95, atype = r
-            self._aurocs.append(auroc)
-            self._auprs.append(aupr)
-            self._fpr95s.append(fpr95)
-            self._types.append(atype)
+            pos, neg, n_clamped, atype, sid = fut.result()
+            self._accumulate(self._by_type, atype, pos, neg, self._n_bins)
+            # Coarsen to scenario resolution by summing adjacent bin groups.
+            ds_pos = pos.view(self._scenario_bins, group).sum(1)
+            ds_neg = neg.view(self._scenario_bins, group).sum(1)
+            self._accumulate(self._by_scenario, sid, ds_pos, ds_neg, self._scenario_bins)
+            self._n_clamped += n_clamped
+            self._n_total += int(pos.sum().item() + neg.sum().item())
         self._futures.clear()
 
     def compute(self) -> Dict[str, Any]:
         self._drain()
-        results: Dict[str, Any] = {
-            "auroc": _mean(self._aurocs),
-            "aupr": _mean(self._auprs),
-            "fpr95": _mean(self._fpr95s),
-            "n_frames": len(self._aurocs),
-        }
-        by_type: Dict[str, Dict[str, float]] = {}
-        grouped: Dict[str, List[int]] = defaultdict(list)
-        for i, t in enumerate(self._types):
-            if t is not None:
-                grouped[t].append(i)
-        for t in sorted(grouped):
-            idxs = grouped[t]
-            by_type[t] = {
-                "auroc": _mean([self._aurocs[i] for i in idxs]),
-                "aupr": _mean([self._auprs[i] for i in idxs]),
-                "fpr95": _mean([self._fpr95s[i] for i in idxs]),
-                "n_frames": len(idxs),
+        if not self._by_type:
+            return {
+                "auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan"),
+                "n_pixels": 0, "n_positive": 0, "clamped_fraction": float("nan"),
             }
+
+        g_pos = torch.zeros(self._n_bins, dtype=torch.int64)
+        g_neg = torch.zeros(self._n_bins, dtype=torch.int64)
+        for pos, neg in self._by_type.values():
+            g_pos += pos
+            g_neg += neg
+        results: Dict[str, Any] = _pooled_metrics(g_pos, g_neg)
+        results["n_pixels"] = int(g_pos.sum().item() + g_neg.sum().item())
+        results["n_positive"] = int(g_pos.sum().item())
+        results["clamped_fraction"] = (
+            self._n_clamped / self._n_total if self._n_total else float("nan")
+        )
+
+        # Scenario-macro: average over scenarios that contain both classes.
+        s_auroc, s_aupr, s_fpr95 = [], [], []
+        for pos, neg in self._by_scenario.values():
+            m = _pooled_metrics(pos, neg)
+            if m["auroc"] == m["auroc"]:  # not NaN -> scenario has positives and negatives
+                s_auroc.append(m["auroc"])
+                s_aupr.append(m["aupr"])
+                s_fpr95.append(m["fpr95"])
+        results["scenario_macro"] = {
+            "auroc": _mean(s_auroc), "aupr": _mean(s_aupr),
+            "fpr95": _mean(s_fpr95), "n_scenarios": len(s_auroc),
+        }
+
+        by_type: Dict[str, Dict[str, float]] = {}
+        for t in sorted(k for k in self._by_type if k is not None):
+            pos, neg = self._by_type[t]
+            m = _pooled_metrics(pos, neg)
+            m["n_positive"] = int(pos.sum().item())
+            by_type[t] = m
         if by_type:
             results["by_type"] = by_type
         return results
@@ -289,21 +396,36 @@ class _SpatialEvaluator:
         for fut in self._futures:  # let outstanding workers finish before clearing
             fut.result()
         self._futures.clear()
-        self._aurocs.clear()
-        self._auprs.clear()
-        self._fpr95s.clear()
-        self._types.clear()
+        self._by_type.clear()
+        self._by_scenario.clear()
+        self._n_clamped = 0
+        self._n_total = 0
 
 
 class PixelEvaluator(_SpatialEvaluator):
-    """Per-pixel anomaly metrics for one camera sensor.
+    """Per-pixel anomaly metrics for one camera sensor, pooled over the split.
 
-    Loads ground-truth masks from ``{scenario_id}/anomaly-{sensor}/{frame:06d}.png``.
+    Loads ground-truth masks from
+    ``{scenario_id}/anomaly-{sensor}/{frame_id:06d}.png`` (any non-zero pixel is
+    anomalous); a missing mask counts as all-negative.
 
     Parameters
     ----------
     sensor:
         Camera direction (``"front"``, ``"left"``, ``"right"``, ``"rear"``).
+    num_workers:
+        Worker threads that decode masks and bin scores off the main loop.
+    max_inflight:
+        Maximum frames queued at once; bounds retained host and GPU memory.
+    n_bins:
+        Bins for the global and per-type score histograms.
+    scenario_bins:
+        Bins for the per-scenario histograms; must divide ``n_bins``.
+    score_transform:
+        Strictly monotonic map applied to scores before binning; defaults to
+        ``asinh``, which handles unbounded scores without tuning.
+    score_range:
+        ``(lo, hi)`` covered by the histogram after ``score_transform``.
     """
 
     def __init__(
@@ -311,8 +433,17 @@ class PixelEvaluator(_SpatialEvaluator):
         sensor: str,
         num_workers: int = _DEFAULT_WORKERS,
         max_inflight: int = _DEFAULT_MAX_INFLIGHT,
+        *,
+        n_bins: int = _DEFAULT_N_BINS,
+        scenario_bins: int = _DEFAULT_SCENARIO_BINS,
+        score_transform: Optional[ScoreTransform] = None,
+        score_range: Optional[Tuple[float, float]] = None,
     ) -> None:
-        super().__init__(num_workers=num_workers, max_inflight=max_inflight)
+        super().__init__(
+            num_workers=num_workers, max_inflight=max_inflight,
+            n_bins=n_bins, scenario_bins=scenario_bins,
+            score_transform=score_transform, score_range=score_range,
+        )
         if sensor not in CAMERAS:
             raise ValueError(f"PixelEvaluator sensor must be one of {CAMERAS}, got {sensor!r}")
         self.sensor = sensor
@@ -333,11 +464,11 @@ class PixelEvaluator(_SpatialEvaluator):
         Parameters
         ----------
         pixel_scores:
-            ``FloatTensor (B, H, W)`` — per-pixel anomaly scores.
+            ``FloatTensor (B, H, W)`` of per-pixel anomaly scores.
         scenario_ids:
-            length-B sequence of scenario path strings.
+            length-B sequence of scenario path strings (see module docstring).
         frame_ids:
-            length-B sequence of frame numbers.
+            length-B sequence of integer frame numbers.
         """
         ps = pixel_scores.detach().float()
         for i in range(ps.shape[0]):
@@ -358,11 +489,14 @@ class PixelEvaluator(_SpatialEvaluator):
 
 
 class PointEvaluator(_SpatialEvaluator):
-    """Per-point anomaly metrics for LiDAR.
+    """Per-point anomaly metrics for LiDAR, pooled over the split.
 
     Loads ground-truth labels from
-    ``{scenario_id}/anomaly-lidar/{frame:06d}.feather`` (``anomaly`` column).
-    Handles variable-length point clouds.
+    ``{scenario_id}/anomaly-lidar/{frame_id:06d}.feather`` (``anomaly`` column)
+    and handles variable-length point clouds.  Constructor parameters
+    (``num_workers``, ``max_inflight``, ``n_bins``, ``scenario_bins``,
+    ``score_transform``, ``score_range``) match :class:`PixelEvaluator`; this
+    evaluator takes no ``sensor`` argument.
     """
 
     def update(
@@ -376,11 +510,11 @@ class PointEvaluator(_SpatialEvaluator):
         Parameters
         ----------
         point_scores:
-            length-B sequence of ``FloatTensor (N_i,)`` — per-point scores.
+            length-B sequence of ``FloatTensor (N_i,)`` per-point scores.
         scenario_ids:
-            length-B sequence of scenario path strings.
+            length-B sequence of scenario path strings (see module docstring).
         frame_ids:
-            length-B sequence of frame numbers.
+            length-B sequence of integer frame numbers.
         """
         for i, scores in enumerate(point_scores):
             s = scores.detach().float().reshape(-1).clone()
@@ -408,7 +542,7 @@ class PointEvaluator(_SpatialEvaluator):
 
 
 # ---------------------------------------------------------------------------
-# Tiers 2 & 3: Sensor / Observation — per-frame AUROC
+# Tiers 2 & 3: Sensor / Observation: per-frame AUROC
 # ---------------------------------------------------------------------------
 
 
@@ -545,10 +679,12 @@ class SensorEvaluator(_FrameLevelEvaluator):
 class ObservationEvaluator(_FrameLevelEvaluator):
     """Per-frame AUROC against observation-level labels.
 
-    A frame is positive if any anomaly is present in the scenario at that
-    timestep, regardless of which sensor sees it.  Labels come from
-    ``{scenario_id}/anomaly-observation.feather``.  Accepts fused
-    multi-sensor scores.  A scenario with 30 frames contributes 30 scores.
+    The observation label marks whether the scene is anomalous at a given
+    timestep, independent of any single sensor.  It can fire when an anomaly is
+    visible to one or more sensors, when the sensors disagree, or for purely
+    semantic anomalies that no sensor localises (e.g. anomalous weather).
+    Labels come from ``{scenario_id}/anomaly-observation.feather``.  Accepts
+    fused multi-sensor scores; a scenario with 30 frames contributes 30 scores.
     """
 
     def _label_path(self, scenario_id: str) -> Path:
@@ -556,16 +692,18 @@ class ObservationEvaluator(_FrameLevelEvaluator):
 
 
 # ---------------------------------------------------------------------------
-# Tier 4: Scenario — one score per scenario
+# Tier 4: Scenario: one score per scenario
 # ---------------------------------------------------------------------------
 
 
 class ScenarioEvaluator:
-    """Scenario-level AUROC — one score per scenario.
+    """Scenario-level AUROC: one score per scenario.
 
-    The label is inferred from the scenario path: ``/test/anomaly/`` is
-    positive, ``/test/normal/`` is negative.  The caller decides how to reduce
-    frame scores to a single scenario score (e.g. max).
+    The label is inferred from the scenario path (``/test/anomaly/`` is
+    positive, ``/test/normal/`` is negative).  Each :meth:`update` takes one
+    scalar score for the whole scenario; how that score is produced is up to the
+    caller and need not involve frame-level evaluation (e.g. a max over frame
+    scores, or a model that scores whole scenarios directly).
     """
 
     def __init__(self) -> None:

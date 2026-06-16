@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..index import CAMERAS, ScenarioIndex
+from ._base import PathLike, required_parts, resolve_index
 from .actions import ActionsDataset
 from .anomaly_obs import AnomalyObservationDataset
 from .camera import CameraDataset
@@ -27,34 +28,56 @@ class CarlAnomalyDataset(Dataset):
 
     Parameters
     ----------
-    index:
-        Shared :class:`ScenarioIndex`.
+    root:
+        Path to the CarlAnomaly dataset directory.
+    split:
+        ``'train'``, ``'test_normal'``, ``'test_anomaly'``, or ``'test'``.
     cameras:
         Camera directions to include.  Defaults to all four.
     transform:
         Optional transform applied to the merged output dict.
+    download:
+        If ``True``, fetch every archive part this joint dataset needs
+        (``base``, ``depth``, ``lidar``, plus ``camera-extended`` when any
+        non-front camera is included) into ``root`` before loading.
+
+    Additional keyword arguments (``clip_len``, ``stride``, ``parts``, ...)
+    are forwarded to :class:`~carlanomaly.index.ScenarioIndex`.
     """
 
     def __init__(
         self,
-        index: ScenarioIndex,
+        root: Optional[PathLike] = None,
+        split: str = "train",
         cameras: Sequence[str] = CAMERAS,
+        *,
         transform: Optional[Callable] = None,
+        index: Optional[ScenarioIndex] = None,
+        download: bool = False,
+        **index_kwargs: Any,
     ) -> None:
+        if download and index is None:
+            specs = [(m, cam) for cam in cameras
+                     for m in ("rgb", "depth", "segmentation", "anomaly_seg")]
+            specs += [(m, None) for m in ("pointcloud", "anomaly_lidar", "weather",
+                                          "gnss", "imu", "actions", "collisions",
+                                          "anomaly_obs")]
+            index_kwargs.setdefault("parts", required_parts(specs))
+        index = resolve_index(root, split, index=index, download=download, **index_kwargs)
         self._index = index
         self.cameras = list(cameras)
         self.transform = transform
 
         self._camera_datasets: Dict[str, CameraDataset] = {
-            cam: CameraDataset(index, direction=cam) for cam in self.cameras
+            cam: CameraDataset(direction=cam, index=index) for cam in self.cameras
         }
-        self._lidar = LiDARDataset(index)
-        self._weather = WeatherDataset(index)
-        self._gnss = GNSSDataset(index)
-        self._imu = IMUDataset(index)
-        self._actions = ActionsDataset(index)
-        self._collisions = CollisionsDataset(index)
-        self._anomaly_obs = AnomalyObservationDataset(index)
+        self._lidar = LiDARDataset(index=index)
+        self._weather = WeatherDataset(index=index)
+        self._gnss = GNSSDataset(index=index)
+        self._imu = IMUDataset(index=index)
+        self._actions = ActionsDataset(index=index)
+        self._collisions = CollisionsDataset(index=index)
+        self._anomaly_obs = AnomalyObservationDataset(index=index)
 
     def __len__(self) -> int:
         return len(self._index)

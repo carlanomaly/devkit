@@ -5,6 +5,10 @@ __pycache__/
 build/
 dist/
 .eggs/
+.pytest_cache/
+
+# Sphinx build output
+docs/_build/
 
 # Virtual environments
 .venv/

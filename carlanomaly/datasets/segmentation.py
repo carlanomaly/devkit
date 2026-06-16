@@ -1,33 +1,48 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
 from PIL import Image
 
 from ..index import ScenarioIndex
-from ._base import AtomicDataset
+from ._base import AtomicDataset, PathLike
 
 
 class SegmentationDataset(AtomicDataset):
     """Per-frame instance segmentation masks from a single camera.
 
     Returns a dict with:
-        ``'semantic'``  — ``LongTensor (T, H, W)`` — CARLA class ids (1-28,
+        ``'semantic'``: ``LongTensor (T, H, W)`` of CARLA class ids (1-28,
             non-contiguous).
-        ``'instance'``  — ``LongTensor (T, H, W)`` — instance ids
+        ``'instance'``: ``LongTensor (T, H, W)`` of instance ids
             (green * 256 + blue channel of the RGBA mask).
+
+    With ``download=True`` the required archive parts are fetched into ``root``
+    automatically (``front`` lives in ``base``; other directions add
+    ``camera-extended``).  Remaining keyword arguments (``clip_len``,
+    ``stride``, ``parts``, ...) are forwarded to
+    :class:`~carlanomaly.index.ScenarioIndex`.
     """
+
+    modality = "segmentation"
 
     def __init__(
         self,
-        index: ScenarioIndex,
+        root: Optional[PathLike] = None,
+        split: str = "train",
         direction: str = "front",
+        *,
         transform: Optional[Callable] = None,
+        index: Optional[ScenarioIndex] = None,
+        download: bool = False,
+        **index_kwargs: Any,
     ) -> None:
-        super().__init__(index, transform)
-        self.direction = direction
+        super().__init__(
+            root, split, direction=direction, transform=transform,
+            index=index, download=download, **index_kwargs,
+        )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         rec, _ = self._index[idx]

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 from PIL import Image
 
 from ..index import ScenarioIndex
-from ._base import AtomicDataset
+from ._base import AtomicDataset, PathLike
 
 
 class AnomalySegmentationDataset(AtomicDataset):
@@ -15,7 +15,15 @@ class AnomalySegmentationDataset(AtomicDataset):
 
     Returns a ``BoolTensor (T, H, W)``.  For the train split (where no
     anomaly masks exist), returns all-False tensors.
+
+    With ``download=True`` the required archive parts are fetched into ``root``
+    automatically (``front`` lives in ``base``; other directions add
+    ``camera-extended``).  Remaining keyword arguments (``clip_len``,
+    ``stride``, ``parts``, ...) are forwarded to
+    :class:`~carlanomaly.index.ScenarioIndex`.
     """
+
+    modality = "anomaly_seg"
 
     # Native resolution used when no mask file exists.
     _DEFAULT_H = 1080
@@ -23,13 +31,19 @@ class AnomalySegmentationDataset(AtomicDataset):
 
     def __init__(
         self,
-        index: ScenarioIndex,
+        root: Optional[PathLike] = None,
+        split: str = "train",
         direction: str = "front",
+        *,
         transform: Optional[Callable] = None,
+        index: Optional[ScenarioIndex] = None,
+        download: bool = False,
+        **index_kwargs: Any,
     ) -> None:
-        super().__init__(index, transform)
-        self.direction = direction
-        self._is_train = index.split == "train"
+        super().__init__(
+            root, split, direction=direction, transform=transform,
+            index=index, download=download, **index_kwargs,
+        )
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]

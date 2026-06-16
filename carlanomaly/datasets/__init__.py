@@ -17,18 +17,18 @@ from .segmentation import SegmentationDataset
 from .weather import WeatherDataset
 
 __all__ = [
-    # Atomic — tabular
+    # Atomic: tabular
     "WeatherDataset",
     "GNSSDataset",
     "IMUDataset",
     "ActionsDataset",
     "CollisionsDataset",
-    # Atomic — image
+    # Atomic: image
     "RGBDataset",
     "DepthDataset",
     "SegmentationDataset",
     "AnomalySegmentationDataset",
-    # Atomic — LiDAR / labels
+    # Atomic: LiDAR / labels
     "PointCloudDataset",
     "AnomalyLiDARDataset",
     "AnomalyObservationDataset",
