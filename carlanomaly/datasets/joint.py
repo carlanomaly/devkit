@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..index import CAMERAS, ScenarioIndex
-from ._base import PathLike, required_parts, resolve_index
+from ._base import PathLike, ensure_parts_for, required_parts, resolve_index
 from .actions import ActionsDataset
 from .anomaly_obs import AnomalyObservationDataset
 from .camera import CameraDataset
@@ -53,31 +53,36 @@ class CarlAnomalyDataset(Dataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = False,
+        download: bool = True,
         **index_kwargs: Any,
     ) -> None:
-        if download and index is None:
-            specs = [(m, cam) for cam in cameras
-                     for m in ("rgb", "depth", "segmentation", "anomaly_seg")]
-            specs += [(m, None) for m in ("pointcloud", "anomaly_lidar", "weather",
-                                          "gnss", "imu", "actions", "collisions",
-                                          "anomaly_obs")]
-            index_kwargs.setdefault("parts", required_parts(specs))
-        index = resolve_index(root, split, index=index, download=download, **index_kwargs)
+        if download:
+            parts = index_kwargs.pop("parts", None)
+            if parts is None:
+                specs = [(m, cam) for cam in cameras
+                         for m in ("rgb", "depth", "segmentation", "anomaly_seg")]
+                specs += [(m, None) for m in ("pointcloud", "anomaly_lidar", "weather",
+                                              "gnss", "imu", "actions", "collisions",
+                                              "anomaly_obs")]
+                parts = required_parts(specs)
+            ensure_parts_for(root, split, index, parts,
+                             verify=index_kwargs.get("download_verify", True))
+        index = resolve_index(root, split, index=index, download=False, **index_kwargs)
         self._index = index
         self.cameras = list(cameras)
         self.transform = transform
 
+        # Parts already fetched above; children must not re-download.
         self._camera_datasets: Dict[str, CameraDataset] = {
-            cam: CameraDataset(direction=cam, index=index) for cam in self.cameras
+            cam: CameraDataset(direction=cam, index=index, download=False) for cam in self.cameras
         }
-        self._lidar = LiDARDataset(index=index)
-        self._weather = WeatherDataset(index=index)
-        self._gnss = GNSSDataset(index=index)
-        self._imu = IMUDataset(index=index)
-        self._actions = ActionsDataset(index=index)
-        self._collisions = CollisionsDataset(index=index)
-        self._anomaly_obs = AnomalyObservationDataset(index=index)
+        self._lidar = LiDARDataset(index=index, download=False)
+        self._weather = WeatherDataset(index=index, download=False)
+        self._gnss = GNSSDataset(index=index, download=False)
+        self._imu = IMUDataset(index=index, download=False)
+        self._actions = ActionsDataset(index=index, download=False)
+        self._collisions = CollisionsDataset(index=index, download=False)
+        self._anomaly_obs = AnomalyObservationDataset(index=index, download=False)
 
     def __len__(self) -> int:
         return len(self._index)

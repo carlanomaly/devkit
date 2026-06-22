@@ -15,9 +15,9 @@ class RGBDataset(AtomicDataset):
 
     Returns a ``FloatTensor (T, 3, H, W)`` in ``[0, 1]``.
 
-    With ``download=True`` the required archive parts are fetched into ``root``
-    automatically (``front`` lives in ``base``; other directions add
-    ``camera-extended``).  Remaining keyword arguments (``clip_len``,
+    The required archive parts are fetched into ``root`` automatically (``front``
+    lives in ``base``; other directions add ``camera-extended``); pass
+    ``download=False`` to skip.  Remaining keyword arguments (``clip_len``,
     ``stride``, ``parts``, ...) are forwarded to
     :class:`~carlanomaly.index.ScenarioIndex`.
     """
@@ -32,7 +32,7 @@ class RGBDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = False,
+        download: bool = True,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(

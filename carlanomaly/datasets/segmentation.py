@@ -19,9 +19,9 @@ class SegmentationDataset(AtomicDataset):
         ``'instance'``: ``LongTensor (T, H, W)`` of instance ids
             (green * 256 + blue channel of the RGBA mask).
 
-    With ``download=True`` the required archive parts are fetched into ``root``
-    automatically (``front`` lives in ``base``; other directions add
-    ``camera-extended``).  Remaining keyword arguments (``clip_len``,
+    The required archive parts are fetched into ``root`` automatically (``front``
+    lives in ``base``; other directions add ``camera-extended``); pass
+    ``download=False`` to skip.  Remaining keyword arguments (``clip_len``,
     ``stride``, ``parts``, ...) are forwarded to
     :class:`~carlanomaly.index.ScenarioIndex`.
     """
@@ -36,7 +36,7 @@ class SegmentationDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = False,
+        download: bool = True,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(

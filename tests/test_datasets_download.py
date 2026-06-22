@@ -115,6 +115,23 @@ def test_no_download_means_no_fetch(record_download):
     assert record_download == []
 
 
+def test_download_is_on_by_default(record_download):
+    # No explicit download= — constructing the dataset should fetch its parts.
+    RGBDataset(root="/data", split="train", direction="left")
+    assert record_download[0]["parts"] == ["base", "camera-extended"]
+
+
+def test_shared_index_dataset_downloads_its_modality_part(record_download):
+    # A dataset attached to a shared index still pulls its modality part
+    # (the index's discovery only needs `base`).
+    idx = ScenarioIndex(root="/data", split="train", download=False)
+    record_download.clear()
+    PointCloudDataset(index=idx)
+    assert record_download[0]["parts"] == ["base", "lidar"]
+    assert record_download[0]["splits"] == ("train",)
+    assert record_download[0]["root"] == Path("/data")
+
+
 def test_camera_composite_downloads_union(record_download):
     CameraDataset(root="/data", split="train", direction="left", download=True)
     assert record_download[0]["parts"] == ["base", "camera-extended", "depth"]

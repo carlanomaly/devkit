@@ -48,6 +48,30 @@ def resolve_index(
     return ScenarioIndex(root=root, split=split, **index_kwargs)
 
 
+def ensure_parts_for(
+    root: Optional[PathLike],
+    split: str,
+    index: Optional[ScenarioIndex],
+    parts: Iterable[str],
+    *,
+    verify: bool = True,
+) -> None:
+    """Download ``parts`` for a dataset, resolving root/split from ``index``.
+
+    A dataset owns the download of the archive parts its modality needs, whether
+    it builds its own :class:`ScenarioIndex` or shares one.  When an ``index`` is
+    shared, its ``root``/``split`` are authoritative; otherwise the explicit
+    ``root``/``split`` are used.  Idempotent (already-present parts are skipped).
+    """
+    from ..download import ensure_parts, splits_for
+
+    eff_root = root if root is not None else (index.root if index is not None else None)
+    if eff_root is None:
+        raise ValueError("either `root` or `index` must be provided")
+    eff_split = index.split if index is not None else split
+    ensure_parts(eff_root, list(parts), splits_for(eff_split), verify=verify)
+
+
 class _CachedFeatherMixin:
     """Shared caching for per-scenario feather files."""
 
@@ -81,16 +105,20 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
     Subclasses point the loader at a dataset ``root`` directory and a
     ``split``; the underlying scenario index is built internally.
 
-    With ``download=True`` the dataset fetches the archive parts it needs into
-    ``root`` before loading (idempotent: already-present parts are skipped).
-    The parts are selected automatically from the subclass's :attr:`modality`
-    (and ``direction`` where applicable), so e.g. a LiDAR dataset pulls the
-    ``lidar`` part and a left-camera dataset pulls ``camera-extended``.  Pass an
-    explicit ``parts`` to override the auto-selection.
+    Downloading is on by default: simply constructing a dataset fetches the
+    archive parts its modality needs into ``root`` (idempotent: already-present
+    parts are skipped).  The parts are selected automatically from the
+    subclass's :attr:`modality` (and ``direction`` where applicable), so e.g. a
+    LiDAR dataset pulls the ``lidar`` part and a left-camera dataset pulls
+    ``camera-extended``.  This holds whether the dataset builds its own index or
+    shares one: a dataset attached to a shared index still pulls its
+    modality-specific part (the index's discovery only needs ``base``).  Pass
+    ``download=False`` to assume the data is already present, or an explicit
+    ``parts`` to override the auto-selection.
     """
 
     #: Dataset-registry modality key (see ``carlanomaly.download``).  Drives the
-    #: ``download=True`` part auto-selection; ``None`` disables it.
+    #: download part auto-selection; ``None`` disables it.
     modality: ClassVar[Optional[str]] = None
 
     def __init__(
@@ -102,7 +130,7 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
         stride: Optional[int] = None,
         anomaly_types: Optional[Sequence[str]] = None,
         towns: Optional[Sequence[str]] = None,
-        download: bool = False,
+        download: bool = True,
         parts: Optional[Sequence[str]] = None,
         download_verify: bool = True,
         direction: Optional[str] = None,
@@ -110,8 +138,12 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
         index: Optional[ScenarioIndex] = None,
     ) -> None:
         self.direction = direction
-        if download and parts is None and self.modality is not None:
-            parts = required_parts([(self.modality, direction)])
+        if download:
+            if parts is None:
+                parts = (required_parts([(self.modality, direction)])
+                         if self.modality is not None else ["base"])
+            ensure_parts_for(root, split, index, parts, verify=download_verify)
+        # Parts are fetched above; the index only discovers (never downloads).
         self._index = resolve_index(
             root,
             split,
@@ -120,11 +152,15 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
             stride=stride,
             anomaly_types=anomaly_types,
             towns=towns,
-            download=download,
-            parts=parts,
+            download=False,
             download_verify=download_verify,
         )
         self.transform = transform
+
+    @property
+    def index(self) -> ScenarioIndex:
+        """The :class:`ScenarioIndex` this dataset is built on (shareable)."""
+        return self._index
 
     @property
     def _is_train(self) -> bool:

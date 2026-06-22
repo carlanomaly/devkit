@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Optional
 from torch.utils.data import Dataset
 
 from ..index import ScenarioIndex
-from ._base import PathLike, required_parts, resolve_index
+from ._base import PathLike, ensure_parts_for, required_parts, resolve_index
 from .anomaly_seg import AnomalySegmentationDataset
 from .depth import DepthDataset
 from .rgb import RGBDataset
@@ -51,22 +51,25 @@ class CameraDataset(Dataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = False,
+        download: bool = True,
         **index_kwargs: Any,
     ) -> None:
-        if download and index is None:
-            index_kwargs.setdefault(
-                "parts", required_parts((m, direction) for m in _CAMERA_MODALITIES)
+        if download:
+            parts = index_kwargs.pop("parts", None) or required_parts(
+                (m, direction) for m in _CAMERA_MODALITIES
             )
-        index = resolve_index(root, split, index=index, download=download, **index_kwargs)
+            ensure_parts_for(root, split, index, parts,
+                             verify=index_kwargs.get("download_verify", True))
+        index = resolve_index(root, split, index=index, download=False, **index_kwargs)
         self._index = index
         self.direction = direction
         self.transform = transform
 
-        self.rgb = RGBDataset(direction=direction, index=index)
-        self.depth = DepthDataset(direction=direction, index=index)
-        self.segmentation = SegmentationDataset(direction=direction, index=index)
-        self.anomaly_seg = AnomalySegmentationDataset(direction=direction, index=index)
+        # Parts already fetched above; children must not re-download.
+        self.rgb = RGBDataset(direction=direction, index=index, download=False)
+        self.depth = DepthDataset(direction=direction, index=index, download=False)
+        self.segmentation = SegmentationDataset(direction=direction, index=index, download=False)
+        self.anomaly_seg = AnomalySegmentationDataset(direction=direction, index=index, download=False)
 
     def __len__(self) -> int:
         return len(self._index)

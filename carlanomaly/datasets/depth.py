@@ -15,9 +15,9 @@ class DepthDataset(AtomicDataset):
 
     Returns a ``FloatTensor (T, 1, H, W)`` in ``[0, 1]`` (uint8 / 255).
 
-    Depth maps live in the ``depth`` part; with ``download=True`` it (plus the
-    ``base`` part) is fetched into ``root`` automatically.  Remaining keyword
-    arguments (``clip_len``, ``stride``, ``parts``, ...) are forwarded to
+    Depth maps live in the ``depth`` part; it (plus the ``base`` part) is fetched
+    into ``root`` automatically; pass ``download=False`` to skip.  Remaining
+    keyword arguments (``clip_len``, ``stride``, ``parts``, ...) are forwarded to
     :class:`~carlanomaly.index.ScenarioIndex`.
     """
 
@@ -31,7 +31,7 @@ class DepthDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = False,
+        download: bool = True,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(
