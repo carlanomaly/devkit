@@ -5,6 +5,7 @@ from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequ
 
 import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import Dataset
 
 from ..download import part_for
@@ -173,3 +174,50 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
         if self.transform is not None:
             return self.transform(item)
         return item
+
+
+class WithIdentifiers(Dataset):
+    """Attach evaluator identifiers to any CarlAnomaly dataset's items.
+
+    Wraps a dataset and returns
+    ``{"data": <wrapped item>, "scenario_id": str, "timesteps": LongTensor (T,)}``,
+    so that a ``DataLoader`` batch carries everything the evaluators need
+    (see the evaluation guide).  Works with every atomic and composite
+    CarlAnomaly dataset::
+
+        rgb = WithIdentifiers(RGBDataset(root, split="test"))
+        item = rgb[0]
+        item["data"]         # what RGBDataset(...)[0] would have returned
+        item["scenario_id"]  # str, e.g. ".../test/normal/Town10HD/scenario-3"
+        item["timesteps"]    # LongTensor (T,)
+
+    When the wrapped dataset returns non-tensor values (point clouds,
+    collision DataFrames), use
+    :func:`~carlanomaly.datasets.carlanomaly_collate_fn` as the DataLoader
+    ``collate_fn``.
+    """
+
+    def __init__(self, dataset: Dataset) -> None:
+        index = getattr(dataset, "index", None)
+        if not isinstance(index, ScenarioIndex):
+            raise TypeError(
+                "WithIdentifiers expects a CarlAnomaly dataset (one that "
+                f"exposes a ScenarioIndex under `.index`), got {type(dataset).__name__}"
+            )
+        self.dataset = dataset
+        self._index = index
+
+    @property
+    def index(self) -> ScenarioIndex:
+        return self._index
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        rec, _ = self._index[idx]
+        return {
+            "data": self.dataset[idx],
+            "scenario_id": str(rec.path),
+            "timesteps": torch.tensor(self._index.timesteps_for(idx), dtype=torch.long),
+        }

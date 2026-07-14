@@ -13,6 +13,8 @@ import pytest
 
 import carlanomaly.download as dl
 from carlanomaly.datasets import (
+    AnomalyScenarioDataset,
+    AnomalySensorDataset,
     CameraDataset,
     CarlAnomalyDataset,
     DepthDataset,
@@ -39,6 +41,10 @@ from carlanomaly.index import ScenarioIndex, ScenarioRecord
         ([("depth", "front")], ["base", "depth"]),
         ([("pointcloud", None)], ["base", "lidar"]),
         ([("weather", None)], ["base"]),
+        ([("anomaly_sensor", "front")], ["base"]),
+        ([("anomaly_sensor", "rear")], ["base", "camera-extended"]),
+        ([("anomaly_sensor", "lidar")], ["base", "lidar"]),
+        ([("anomaly_scenario", None)], ["base"]),
         (
             [("rgb", "left"), ("depth", "front"), ("pointcloud", None)],
             ["base", "camera-extended", "depth", "lidar"],
@@ -72,7 +78,7 @@ def record_download(monkeypatch):
     monkeypatch.setattr(dl, "ensure_parts", fake_ensure_parts)
     monkeypatch.setattr(
         ScenarioIndex, "_discover",
-        lambda self: [ScenarioRecord(path=Path("/x/s0"), n_frames=1, split="train",
+        lambda self: [ScenarioRecord(path=Path("/x/s0"), n_timesteps=1, split="train",
                                      town=None, anomaly_type=None)],
     )
     return calls
@@ -101,6 +107,21 @@ def test_pointcloud_downloads_lidar_part(record_download):
 
 def test_weather_downloads_base_only(record_download):
     WeatherDataset(root="/data", split="train", download=True)
+    assert record_download[0]["parts"] == ["base"]
+
+
+def test_anomaly_sensor_lidar_downloads_lidar_part(record_download):
+    AnomalySensorDataset(root="/data", split="train", sensor="lidar", download=True)
+    assert record_download[0]["parts"] == ["base", "lidar"]
+
+
+def test_anomaly_sensor_left_downloads_camera_extended(record_download):
+    AnomalySensorDataset(root="/data", split="train", sensor="left", download=True)
+    assert record_download[0]["parts"] == ["base", "camera-extended"]
+
+
+def test_anomaly_scenario_downloads_base_only(record_download):
+    AnomalyScenarioDataset(root="/data", split="train", download=True)
     assert record_download[0]["parts"] == ["base"]
 
 

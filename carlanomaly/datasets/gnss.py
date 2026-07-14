@@ -6,7 +6,7 @@ from ._base import AtomicDataset
 
 
 class GNSSDataset(AtomicDataset):
-    """Per-frame GNSS position.
+    """Per-timestep GNSS position.
 
     Returns a ``FloatTensor (T, 3)`` with columns: altitude, latitude, longitude.
     """
@@ -15,7 +15,7 @@ class GNSSDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         arr = self._read_feather_cached(rec, "gnss")
-        item = torch.from_numpy(arr[frames])  # (T, 3)
+        item = torch.from_numpy(arr[timesteps])  # (T, 3)
         return self._apply_transform(item)

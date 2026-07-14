@@ -11,7 +11,7 @@ from ._base import AtomicDataset, PathLike
 
 
 class RGBDataset(AtomicDataset):
-    """Per-frame RGB images from a single camera.
+    """Per-timestep RGB images from a single camera.
 
     Returns a ``FloatTensor (T, 3, H, W)`` in ``[0, 1]``.
 
@@ -42,9 +42,9 @@ class RGBDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         images = []
-        for f in frames:
+        for f in timesteps:
             path = rec.path / f"rgb-{self.direction}" / f"{f:06d}.jpg"
             img = Image.open(path).convert("RGB")
             arr = np.array(img, dtype=np.float32) / 255.0  # (H, W, 3)

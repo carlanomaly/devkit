@@ -11,7 +11,7 @@ from ._base import AtomicDataset, PathLike
 
 
 class DepthDataset(AtomicDataset):
-    """Per-frame log-encoded depth maps from a single camera.
+    """Per-timestep log-encoded depth maps from a single camera.
 
     Returns a ``FloatTensor (T, 1, H, W)`` in ``[0, 1]`` (uint8 / 255).
 
@@ -41,9 +41,9 @@ class DepthDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         images = []
-        for f in frames:
+        for f in timesteps:
             path = rec.path / f"depth-{self.direction}" / f"{f:06d}.png"
             img = Image.open(path).convert("L")
             arr = np.array(img, dtype=np.float32) / 255.0  # (H, W)

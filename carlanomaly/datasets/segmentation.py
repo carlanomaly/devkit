@@ -11,7 +11,7 @@ from ._base import AtomicDataset, PathLike
 
 
 class SegmentationDataset(AtomicDataset):
-    """Per-frame instance segmentation masks from a single camera.
+    """Per-timestep instance segmentation masks from a single camera.
 
     Returns a dict with:
         ``'semantic'``: ``LongTensor (T, H, W)`` of CARLA class ids (1-28,
@@ -46,9 +46,9 @@ class SegmentationDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         semantic_list, instance_list = [], []
-        for f in frames:
+        for f in timesteps:
             path = rec.path / f"segmentation-{self.direction}" / f"{f:06d}.png"
             arr = np.array(Image.open(path).convert("RGBA"))  # (H, W, 4)
             r = arr[:, :, 0].astype(np.int64)

@@ -109,27 +109,27 @@ def test_pooled_degenerate_single_class_is_nan():
 
 
 # ---------------------------------------------------------------------------
-# The core regression: pooling removes the positive-frame selection bias
+# The core regression: pooling removes the positive-timestep selection bias
 # ---------------------------------------------------------------------------
 
 
 def test_pooling_penalises_traffic_light_shortcut():
     """A detector that scores *all* traffic lights high (and cannot tell a broken
-    light from an ordinary one) should look great under per-frame macro-averaging
-    over anomaly frames, but poor under pooled evaluation that also sees the many
-    high-scored ordinary lights in normal frames.
+    light from an ordinary one) should look great under per-timestep macro-averaging
+    over anomalous timesteps, but poor under pooled evaluation that also sees the many
+    high-scored ordinary lights in normal timesteps.
     """
     HIGH, LOW = 0.9, 0.1
 
-    # Anomaly frame: 1 broken light (label 1) + few ordinary lights + lots of bg.
+    # Anomalous timestep: 1 broken light (label 1) + few ordinary lights + lots of bg.
     anom_scores = torch.tensor([HIGH] + [HIGH] * 9 + [LOW] * 990)
     anom_labels = torch.tensor([1] + [0] * 9 + [0] * 990)
 
-    # Normal frames: dominated by ordinary traffic lights, all scored HIGH, label 0.
+    # Normal timesteps: dominated by ordinary traffic lights, all scored HIGH, label 0.
     norm_scores = torch.full((5 * 1000,), HIGH)
     norm_labels = torch.zeros(5 * 1000, dtype=torch.long)
 
-    # Per-frame macro over anomaly-containing frames (the biased metric).
+    # Per-timestep macro over anomaly-containing timesteps (the biased metric).
     macro = BinaryAUROC()(anom_scores, anom_labels).item()
 
     # Pooled over all evaluated pixels (the fix).
@@ -151,7 +151,7 @@ ANOM = "/data/test/anomaly/Town01/broken_light/0000"
 NORM = "/data/test/normal/Town01/0000"
 
 
-def test_pixel_evaluator_pools_across_frames(monkeypatch):
+def test_pixel_evaluator_pools_across_timesteps(monkeypatch):
     HIGH, LOW = 0.9, 0.1
     n = 1000
 
@@ -161,7 +161,7 @@ def test_pixel_evaluator_pools_across_frames(monkeypatch):
     }
     scores = {
         (ANOM, 0): torch.tensor([HIGH] * 10 + [LOW] * (n - 10)),
-        (NORM, 0): torch.full((4 * n,), HIGH),  # normal frames full of high-scored lights
+        (NORM, 0): torch.full((4 * n,), HIGH),  # normal timesteps full of high-scored lights
     }
 
     ev = PixelEvaluator(sensor="front", num_workers=2, max_inflight=4,
@@ -172,10 +172,10 @@ def test_pixel_evaluator_pools_across_frames(monkeypatch):
         ev.update(s.unsqueeze(0), [sid], [fid])
     res = ev.compute()
 
-    assert res["n_pixels"] == 5 * n
+    assert res["n_samples"] == 5 * n
     assert res["n_positive"] == 1
     assert res["clamped_fraction"] == pytest.approx(0.0)
-    assert res["auroc"] < 0.7  # shortcut exposed by including the normal frame
+    assert res["auroc"] < 0.7  # shortcut exposed by including the normal timestep
     # Only the anomaly scenario has both classes -> contributes to scenario macro.
     assert res["scenario_macro"]["n_scenarios"] == 1
     assert "broken_light" in res["by_type"]
@@ -185,7 +185,7 @@ def test_pixel_evaluator_pools_across_frames(monkeypatch):
 def test_pixel_evaluator_empty_compute():
     ev = PixelEvaluator(sensor="front")
     res = ev.compute()
-    assert res["n_pixels"] == 0
+    assert res["n_samples"] == 0
     assert np.isnan(res["auroc"])
 
 
@@ -205,13 +205,13 @@ def test_point_evaluator_variable_length(monkeypatch):
     for (sid, fid), s in scores.items():
         ev.update([s], [sid], [fid])
     res = ev.compute()
-    assert res["n_pixels"] == 7
+    assert res["n_samples"] == 7
     assert res["n_positive"] == 2
     assert res["auroc"] == pytest.approx(1.0, abs=1e-3)  # positives are the top scores
 
 
 # ---------------------------------------------------------------------------
-# Frame / scenario tiers
+# Sensor / timestep / scenario levels
 # ---------------------------------------------------------------------------
 
 
@@ -227,8 +227,8 @@ def test_scenario_evaluator_label_from_path():
     assert res["by_type"]["broken_light"]["n_scenarios"] == 2
 
 
-def test_sensor_evaluator_frame_auroc(monkeypatch):
-    # Two scenarios, three frames each; positive on the last frame of the anomaly scenario.
+def test_sensor_evaluator_auroc(monkeypatch):
+    # Two scenarios, three timesteps each; positive on the last timestep of the anomaly scenario.
     label_arrays = {
         ANOM: np.array([False, False, True]),
         NORM: np.array([False, False, False]),
@@ -239,5 +239,5 @@ def test_sensor_evaluator_frame_auroc(monkeypatch):
     ev.update([0.1, 0.2, 0.9], [ANOM, ANOM, ANOM], [0, 1, 2])
     ev.update([0.05, 0.1, 0.15], [NORM, NORM, NORM], [0, 1, 2])
     res = ev.compute()
-    assert res["n_frames"] == 6
-    assert res["auroc"] == pytest.approx(1.0)  # the one positive frame is top-scored
+    assert res["n_timesteps"] == 6
+    assert res["auroc"] == pytest.approx(1.0)  # the one positive timestep is top-scored

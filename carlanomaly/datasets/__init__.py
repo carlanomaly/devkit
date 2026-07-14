@@ -1,9 +1,12 @@
 """Atomic and composite CarlAnomaly datasets."""
 
+from ._base import WithIdentifiers
 from .actions import ActionsDataset
 from .anomaly_lidar import AnomalyLiDARDataset
-from .anomaly_obs import AnomalyObservationDataset
+from .anomaly_scenario import AnomalyScenarioDataset
 from .anomaly_seg import AnomalySegmentationDataset
+from .anomaly_sensor import AnomalySensorDataset
+from .anomaly_timestep import AnomalyTimestepDataset
 from .camera import CameraDataset
 from .collisions import CollisionsDataset
 from .depth import DepthDataset
@@ -28,13 +31,17 @@ __all__ = [
     "DepthDataset",
     "SegmentationDataset",
     "AnomalySegmentationDataset",
-    # Atomic: LiDAR / labels
+    # Atomic: LiDAR
     "PointCloudDataset",
+    # Anomaly labels (one per evaluation level)
     "AnomalyLiDARDataset",
-    "AnomalyObservationDataset",
-    # Composite
+    "AnomalyScenarioDataset",
+    "AnomalySensorDataset",
+    "AnomalyTimestepDataset",
+    # Composite / utilities
     "CameraDataset",
     "LiDARDataset",
     "CarlAnomalyDataset",
+    "WithIdentifiers",
     "carlanomaly_collate_fn",
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
+import torch
 from torch.utils.data import Dataset
 
 from ..index import ScenarioIndex
@@ -22,7 +23,8 @@ class CameraDataset(Dataset):
     :class:`SegmentationDataset`, and :class:`AnomalySegmentationDataset`.
 
     Returns a dict with keys ``'rgb'``, ``'depth'``, ``'segmentation'``
-    (sub-dict with ``'semantic'`` and ``'instance'``), and ``'anomaly_mask'``.
+    (sub-dict with ``'semantic'`` and ``'instance'``), and ``'anomaly_mask'``,
+    plus the evaluator identifiers ``'scenario_id'`` and ``'timesteps'``.
 
     Parameters
     ----------
@@ -71,11 +73,19 @@ class CameraDataset(Dataset):
         self.segmentation = SegmentationDataset(direction=direction, index=index, download=False)
         self.anomaly_seg = AnomalySegmentationDataset(direction=direction, index=index, download=False)
 
+    @property
+    def index(self) -> ScenarioIndex:
+        """The :class:`ScenarioIndex` this dataset is built on (shareable)."""
+        return self._index
+
     def __len__(self) -> int:
         return len(self._index)
 
     def __getitem__(self, idx: int) -> Dict:
+        rec, _ = self._index[idx]
         item = {
+            "scenario_id": str(rec.path),
+            "timesteps": torch.tensor(self._index.timesteps_for(idx), dtype=torch.long),
             "rgb": self.rgb[idx],
             "depth": self.depth[idx],
             "segmentation": self.segmentation[idx],

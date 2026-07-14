@@ -7,6 +7,8 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 CAMERAS = ("front", "left", "right", "rear")
 
+SENSORS = CAMERAS + ("lidar",)
+
 ANOMALY_TYPES = (
     "change-weather",
     "running-pedestrian",
@@ -23,7 +25,7 @@ ANOMALY_TYPES = (
 @dataclass(frozen=True)
 class ScenarioRecord:
     path: Path
-    n_frames: int
+    n_timesteps: int
     split: str  # 'train' | 'test_normal' | 'test_anomaly'
     town: Optional[str]
     anomaly_type: Optional[str]
@@ -35,7 +37,7 @@ class ScenarioIndex:
     Datasets construct this internally from the ``root``/``split`` you pass
     them, so you normally never instantiate it directly.  Datasets built with
     the same parameters produce identical indices, so ``dataset_a[i]`` and
-    ``dataset_b[i]`` always refer to the same scenario and frame window.
+    ``dataset_b[i]`` always refer to the same scenario and timestep window.
 
     Parameters
     ----------
@@ -46,7 +48,7 @@ class ScenarioIndex:
         ``'train'``, ``'test_normal'``, ``'test_anomaly'``, or ``'test'``
         (= normal + anomaly combined).
     clip_len:
-        Number of consecutive frames per item.
+        Number of consecutive timesteps per item.
     stride:
         Sliding-window stride.  Defaults to ``clip_len``.
     anomaly_types:
@@ -114,12 +116,12 @@ class ScenarioIndex:
         return len(self._index)
 
     def __getitem__(self, idx: int) -> Tuple[ScenarioRecord, int]:
-        """Return ``(ScenarioRecord, frame_start)`` for the given item index."""
-        rec_idx, frame_start = self._index[idx]
-        return self._records[rec_idx], frame_start
+        """Return ``(ScenarioRecord, timestep_start)`` for the given item index."""
+        rec_idx, timestep_start = self._index[idx]
+        return self._records[rec_idx], timestep_start
 
-    def frames_for(self, idx: int) -> List[int]:
-        """Return the list of frame indices for item ``idx``."""
+    def timesteps_for(self, idx: int) -> List[int]:
+        """Return the list of timestep indices for item ``idx``."""
         _, start = self._index[idx]
         return list(range(start, start + self.clip_len))
 
@@ -154,11 +156,11 @@ class ScenarioIndex:
             for sc_dir in sorted(town_dir.iterdir()):
                 if not sc_dir.is_dir():
                     continue
-                n = self._count_rgb_frames(sc_dir)
+                n = self._count_timesteps(sc_dir)
                 if n > 0:
                     records.append(ScenarioRecord(
                         path=sc_dir,
-                        n_frames=n,
+                        n_timesteps=n,
                         split="train",
                         town=town_dir.name,
                         anomaly_type=None,
@@ -176,11 +178,11 @@ class ScenarioIndex:
             town = sc_dir.parent.name
             if self.towns and town not in self.towns:
                 continue
-            n = self._count_rgb_frames(sc_dir)
+            n = self._count_timesteps(sc_dir)
             if n > 0:
                 records.append(ScenarioRecord(
                     path=sc_dir,
-                    n_frames=n,
+                    n_timesteps=n,
                     split="test_normal",
                     town=town,
                     anomaly_type=None,
@@ -201,11 +203,11 @@ class ScenarioIndex:
                 continue
             if self.towns and town not in self.towns:
                 continue
-            n = self._count_rgb_frames(sc_dir)
+            n = self._count_timesteps(sc_dir)
             if n > 0:
                 records.append(ScenarioRecord(
                     path=sc_dir,
-                    n_frames=n,
+                    n_timesteps=n,
                     split="test_anomaly",
                     town=town,
                     anomaly_type=atype,
@@ -219,7 +221,7 @@ class ScenarioIndex:
     def _build_index(self) -> List[Tuple[int, int]]:
         index = []
         for rec_idx, rec in enumerate(self._records):
-            max_start = rec.n_frames - self.clip_len
+            max_start = rec.n_timesteps - self.clip_len
             if max_start < 0:
                 continue
             for start in range(0, max_start + 1, self.stride):
@@ -231,7 +233,7 @@ class ScenarioIndex:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _count_rgb_frames(sc_dir: Path) -> int:
+    def _count_timesteps(sc_dir: Path) -> int:
         rgb_dir = sc_dir / "rgb-front"
         if not rgb_dir.exists():
             return 0

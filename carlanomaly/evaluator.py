@@ -1,9 +1,10 @@
 """Multi-level evaluators for the CarlAnomaly benchmark.
 
-Evaluation is split into four independent tiers, each a pure metric
-calculator that loads its own ground-truth labels from disk.  The caller
-only ever provides anomaly *scores* plus identifiers (``scenario_id`` and
-``frame_id``); reducing pixel/point scores to frame scores and fusing
+Evaluation happens at four independent levels — **sample**, **sensor**,
+**timestep**, and **scenario** — each served by a pure metric calculator
+that loads its own ground-truth labels from disk.  The caller only ever
+provides anomaly *scores* plus identifiers (``scenario_id`` and
+``timestep_id``); reducing sample scores to higher-level scores and fusing
 multiple sensors is the caller's responsibility.
 
 Identifiers
@@ -13,22 +14,22 @@ the datasets expose under the same key).  Evaluators use it both to locate a
 scenario's label files and to parse its anomaly type and town from the path,
 so it must follow the on-disk layout, e.g.
 ``.../test/anomaly/{town}/{anomaly_type}/{run}`` or
-``.../test/normal/{town}/{run}``.  ``frame_id`` is the integer frame number,
-used to index per-frame labels and to build per-frame label paths
-(``{frame_id:06d}.png`` / ``.feather``).
+``.../test/normal/{town}/{run}``.  ``timestep_id`` is the integer timestep
+number, used to index per-timestep labels and to build per-timestep label
+paths (``{timestep_id:06d}.png`` / ``.feather``).
 
-Tiers
------
-- :class:`PixelEvaluator` / :class:`PointEvaluator`: spatial metrics (AUROC,
-  AUPR, FPR@95TPR) pooled over every evaluated pixel/point in the split
-  (anomalous frames, anomaly-free frames, and normal scenarios alike) using
-  bounded-memory streaming histograms.
-- :class:`SensorEvaluator`: frame-level AUROC against sensor-specific labels
-  (``anomaly-{sensor}/sensor.feather``).
-- :class:`ObservationEvaluator`: frame-level AUROC against observation-level
-  labels (``anomaly-observation.feather``).
-- :class:`ScenarioEvaluator`: one score per scenario; label inferred from the
-  scenario path.
+Levels
+------
+- :class:`PixelEvaluator` / :class:`PointEvaluator` (sample level): metrics
+  (AUROC, AUPR, FPR@95TPR) pooled over every evaluated pixel/point in the
+  split (anomalous timesteps, anomaly-free timesteps, and normal scenarios
+  alike) using bounded-memory streaming histograms.
+- :class:`SensorEvaluator` (sensor level): per-timestep AUROC against
+  sensor-specific labels (``anomaly-{sensor}/sensor.feather``).
+- :class:`TimestepEvaluator` (timestep level): per-timestep AUROC against
+  timestep-level labels (stored on disk as ``anomaly-observation.feather``).
+- :class:`ScenarioEvaluator` (scenario level): one score per scenario; label
+  inferred from the scenario path.
 """
 
 from __future__ import annotations
@@ -47,14 +48,12 @@ import torch
 from PIL import Image
 from torchmetrics.classification import BinaryAUROC
 
-from .index import CAMERAS
-
-SENSORS = CAMERAS + ("lidar",)
+from .index import CAMERAS, SENSORS
 
 # Native camera resolution, used when a mask file is missing.
 _MASK_H, _MASK_W = 1080, 1920
 
-# Spatial-tier async defaults: worker threads load labels + compute metrics off
+# Sample-level async defaults: worker threads load labels + compute metrics off
 # the main loop; max_inflight bounds host RAM held by queued score tensors.
 _DEFAULT_WORKERS = 32
 _DEFAULT_MAX_INFLIGHT = 32
@@ -119,15 +118,16 @@ def _auroc(scores: Sequence[float], labels: Sequence[bool]) -> float:
 def _as_float_list(scores: Any) -> List[float]:
     """Coerce a batch of scalar scores (tensor/array/sequence) to a float list.
 
-    Rejects non-scalar elements so that spatial data (e.g. pixel maps) passed
-    to a frame-level evaluator fails loudly rather than being silently reduced.
+    Rejects non-scalar elements so that sample-level data (e.g. pixel maps)
+    passed to a per-timestep evaluator fails loudly rather than being silently
+    reduced.
     """
     if isinstance(scores, torch.Tensor):
         t = scores.detach().cpu().float()
         if t.ndim != 1:
             raise ValueError(
                 f"expected a 1-D batch of scalar scores, got tensor with shape "
-                f"{tuple(t.shape)}; reduce spatial scores to per-frame scalars first"
+                f"{tuple(t.shape)}; reduce sample scores to per-timestep scalars first"
             )
         return t.tolist()
     if isinstance(scores, np.ndarray):
@@ -148,7 +148,7 @@ def _as_float_list(scores: Any) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# Tier 1: Pixel / Point: pooled spatial metrics over the whole split
+# Sample level: pixel/point metrics pooled over the whole split
 # ---------------------------------------------------------------------------
 
 #: |score| beyond this saturates the default ``asinh`` histogram range.
@@ -239,24 +239,27 @@ def _pooled_metrics(h_pos: torch.Tensor, h_neg: torch.Tensor) -> Dict[str, float
     return {"auroc": auroc, "aupr": aupr, "fpr95": fpr95}
 
 
-class _SpatialEvaluator:
-    """Pooled per-element spatial metrics over the entire evaluated split.
+class _SampleLevelEvaluator:
+    """Pooled per-sample (pixel/point) metrics over the entire evaluated split.
 
-    Unlike a per-frame macro-average, every pixel/point (from anomalous frames,
-    anomaly-free frames, and normal scenarios alike) enters a single pooled
-    binary problem.  This removes the selection bias of conditioning the negative
-    distribution on "the frame contains an anomaly" (see ``plan.md`` §3).
+    Unlike a per-timestep macro-average, every pixel/point (from anomalous
+    timesteps, anomaly-free timesteps, and normal scenarios alike) enters a
+    single pooled binary problem.  This removes the selection bias of
+    conditioning the negative distribution on "the timestep contains an
+    anomaly": a detector cannot score high merely by ranking a difficult class
+    (e.g. all traffic lights) above unrelated background, because normal
+    instances of that class from the rest of the split enter the negatives.
 
     Scores are accumulated into bounded-memory score histograms; label loading
     (PNG/feather decode) and binning run on a pool of worker threads so they
-    overlap the GPU's next forward pass.  ``update()`` submits per-frame tasks
-    and ``compute()`` joins them, draining every outstanding future before
-    aggregating.  Three views are derived from one set of histograms:
+    overlap the GPU's next forward pass.  ``update()`` submits per-timestep
+    tasks and ``compute()`` joins them, draining every outstanding future
+    before aggregating.  Three views are derived from one set of histograms:
 
     - **global** pooled AUROC/AUPR/FPR95 (the primary metric);
     - **by_type** pooled metrics, grouped by anomaly type;
     - **scenario_macro**: per-scenario metrics averaged over scenarios that
-      contain positives (an equal-per-scenario secondary diagnostic, §5).
+      contain positives (an equal-per-scenario secondary diagnostic).
 
     See :class:`PixelEvaluator` for the constructor parameters.
     """
@@ -293,14 +296,15 @@ class _SpatialEvaluator:
         load_labels: Callable[[], torch.Tensor],
         scenario_id: str,
     ) -> None:
-        """Queue one frame's label-load + histogram binning on a worker thread.
+        """Queue one timestep's label-load + histogram binning on a worker thread.
 
         ``scores`` stays on its source device (the model's GPU); the worker
         decodes the label file on the CPU (parallel I/O, GIL released), bins both
         classes, and returns small ``n_bins``-length count tensors.  Blocks if
-        ``max_inflight`` frames are already queued (backpressure), bounding both
-        host work and retained GPU score tensors.  Every frame contributes,
-        including frames with no positive labels (they are pure-negative pools).
+        ``max_inflight`` timesteps are already queued (backpressure), bounding
+        both host work and retained GPU score tensors.  Every timestep
+        contributes, including those with no positive labels (they are
+        pure-negative pools).
         """
         self._sem.acquire()
         atype = _parse_anomaly_type(scenario_id)
@@ -332,7 +336,7 @@ class _SpatialEvaluator:
         store[key][1].add_(neg)
 
     def _drain(self) -> None:
-        """Wait for every queued frame, accumulating counts in submission order.
+        """Wait for every queued timestep, accumulating counts in submission order.
 
         ``Future.result()`` re-raises any exception a worker hit (e.g. a corrupt
         mask), so failures surface here rather than being silently dropped.
@@ -354,7 +358,7 @@ class _SpatialEvaluator:
         if not self._by_type:
             return {
                 "auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan"),
-                "n_pixels": 0, "n_positive": 0, "clamped_fraction": float("nan"),
+                "n_samples": 0, "n_positive": 0, "clamped_fraction": float("nan"),
             }
 
         g_pos = torch.zeros(self._n_bins, dtype=torch.int64)
@@ -363,7 +367,7 @@ class _SpatialEvaluator:
             g_pos += pos
             g_neg += neg
         results: Dict[str, Any] = _pooled_metrics(g_pos, g_neg)
-        results["n_pixels"] = int(g_pos.sum().item() + g_neg.sum().item())
+        results["n_samples"] = int(g_pos.sum().item() + g_neg.sum().item())
         results["n_positive"] = int(g_pos.sum().item())
         results["clamped_fraction"] = (
             self._n_clamped / self._n_total if self._n_total else float("nan")
@@ -402,12 +406,12 @@ class _SpatialEvaluator:
         self._n_total = 0
 
 
-class PixelEvaluator(_SpatialEvaluator):
-    """Per-pixel anomaly metrics for one camera sensor, pooled over the split.
+class PixelEvaluator(_SampleLevelEvaluator):
+    """Sample-level metrics over per-pixel scores of one camera, pooled over the split.
 
     Loads ground-truth masks from
-    ``{scenario_id}/anomaly-{sensor}/{frame_id:06d}.png`` (any non-zero pixel is
-    anomalous); a missing mask counts as all-negative.
+    ``{scenario_id}/anomaly-{sensor}/{timestep_id:06d}.png`` (any non-zero pixel
+    is anomalous); a missing mask counts as all-negative.
 
     Parameters
     ----------
@@ -416,7 +420,7 @@ class PixelEvaluator(_SpatialEvaluator):
     num_workers:
         Worker threads that decode masks and bin scores off the main loop.
     max_inflight:
-        Maximum frames queued at once; bounds retained host and GPU memory.
+        Maximum timesteps queued at once; bounds retained host and GPU memory.
     n_bins:
         Bins for the global and per-type score histograms.
     scenario_bins:
@@ -452,14 +456,14 @@ class PixelEvaluator(_SpatialEvaluator):
         self,
         pixel_scores: torch.Tensor,
         scenario_ids: Sequence[str],
-        frame_ids: Sequence[int],
+        timestep_ids: Sequence[int],
     ) -> None:
         """Accumulate one batch of per-pixel scores.
 
-        Scores stay on their source device (the model's GPU); each frame's
+        Scores stay on their source device (the model's GPU); each timestep's
         mask decode + GPU metric computation is handed to a worker thread.  Each
-        frame's score slice is cloned so the full batch tensor can be freed
-        immediately, bounding retained GPU memory to ``max_inflight`` frames.
+        timestep's score slice is cloned so the full batch tensor can be freed
+        immediately, bounding retained GPU memory to ``max_inflight`` timesteps.
 
         Parameters
         ----------
@@ -467,32 +471,32 @@ class PixelEvaluator(_SpatialEvaluator):
             ``FloatTensor (B, H, W)`` of per-pixel anomaly scores.
         scenario_ids:
             length-B sequence of scenario path strings (see module docstring).
-        frame_ids:
-            length-B sequence of integer frame numbers.
+        timestep_ids:
+            length-B sequence of integer timestep numbers.
         """
         ps = pixel_scores.detach().float()
         for i in range(ps.shape[0]):
             sid = scenario_ids[i]
-            fid = int(frame_ids[i])
+            tid = int(timestep_ids[i])
             self._submit(
                 ps[i].reshape(-1).clone(),
-                lambda sid=sid, fid=fid: self._load_mask(sid, fid).reshape(-1),
+                lambda sid=sid, tid=tid: self._load_mask(sid, tid).reshape(-1),
                 sid,
             )
 
-    def _load_mask(self, scenario_id: str, frame_id: int) -> torch.Tensor:
-        path = Path(scenario_id) / f"anomaly-{self.sensor}" / f"{frame_id:06d}.png"
+    def _load_mask(self, scenario_id: str, timestep_id: int) -> torch.Tensor:
+        path = Path(scenario_id) / f"anomaly-{self.sensor}" / f"{timestep_id:06d}.png"
         if path.exists():
             arr = np.array(Image.open(path).convert("L"))
             return torch.from_numpy(arr > 0)
         return torch.zeros(_MASK_H, _MASK_W, dtype=torch.bool)
 
 
-class PointEvaluator(_SpatialEvaluator):
-    """Per-point anomaly metrics for LiDAR, pooled over the split.
+class PointEvaluator(_SampleLevelEvaluator):
+    """Sample-level metrics over per-point LiDAR scores, pooled over the split.
 
     Loads ground-truth labels from
-    ``{scenario_id}/anomaly-lidar/{frame_id:06d}.feather`` (``anomaly`` column)
+    ``{scenario_id}/anomaly-lidar/{timestep_id:06d}.feather`` (``anomaly`` column)
     and handles variable-length point clouds.  Constructor parameters
     (``num_workers``, ``max_inflight``, ``n_bins``, ``scenario_bins``,
     ``score_transform``, ``score_range``) match :class:`PixelEvaluator`; this
@@ -503,7 +507,7 @@ class PointEvaluator(_SpatialEvaluator):
         self,
         point_scores: Sequence[torch.Tensor],
         scenario_ids: Sequence[str],
-        frame_ids: Sequence[int],
+        timestep_ids: Sequence[int],
     ) -> None:
         """Accumulate one batch of per-point scores.
 
@@ -513,22 +517,22 @@ class PointEvaluator(_SpatialEvaluator):
             length-B sequence of ``FloatTensor (N_i,)`` per-point scores.
         scenario_ids:
             length-B sequence of scenario path strings (see module docstring).
-        frame_ids:
-            length-B sequence of integer frame numbers.
+        timestep_ids:
+            length-B sequence of integer timestep numbers.
         """
         for i, scores in enumerate(point_scores):
             s = scores.detach().float().reshape(-1).clone()
             sid = scenario_ids[i]
-            fid = int(frame_ids[i])
+            tid = int(timestep_ids[i])
             n = s.shape[0]
             self._submit(
                 s,
-                lambda sid=sid, fid=fid, n=n: self._load_labels(sid, fid, n),
+                lambda sid=sid, tid=tid, n=n: self._load_labels(sid, tid, n),
                 sid,
             )
 
-    def _load_labels(self, scenario_id: str, frame_id: int, n_points: int) -> torch.Tensor:
-        path = Path(scenario_id) / "anomaly-lidar" / f"{frame_id:06d}.feather"
+    def _load_labels(self, scenario_id: str, timestep_id: int, n_points: int) -> torch.Tensor:
+        path = Path(scenario_id) / "anomaly-lidar" / f"{timestep_id:06d}.feather"
         if not path.exists():
             return torch.zeros(n_points, dtype=torch.bool)
         df = pd.read_feather(path)
@@ -542,15 +546,15 @@ class PointEvaluator(_SpatialEvaluator):
 
 
 # ---------------------------------------------------------------------------
-# Tiers 2 & 3: Sensor / Observation: per-frame AUROC
+# Sensor & timestep levels: per-timestep AUROC
 # ---------------------------------------------------------------------------
 
 
-class _FrameLevelEvaluator:
-    """Shared logic for per-frame AUROC with per-frame ground-truth labels.
+class _PerTimestepEvaluator:
+    """Shared logic for per-timestep AUROC with per-timestep ground-truth labels.
 
     Labels are loaded once per scenario (a full per-scenario boolean array,
-    indexed by ``frame_id``) and cached.
+    indexed by ``timestep_id``) and cached.
     """
 
     def __init__(self) -> None:
@@ -558,7 +562,7 @@ class _FrameLevelEvaluator:
         self._labels: List[bool] = []
         self._types: List[Optional[str]] = []
         self._scenario_ids: List[str] = []
-        self._frame_ids: List[int] = []
+        self._timestep_ids: List[int] = []
         self._label_cache: Dict[str, np.ndarray] = {}
 
     # Subclasses provide the path to the per-scenario label feather.
@@ -569,9 +573,9 @@ class _FrameLevelEvaluator:
         self,
         scores: Any,
         scenario_ids: Sequence[str],
-        frame_ids: Sequence[int],
+        timestep_ids: Sequence[int],
     ) -> None:
-        """Accumulate one batch of scalar per-frame scores.
+        """Accumulate one batch of scalar per-timestep scores.
 
         Parameters
         ----------
@@ -579,17 +583,17 @@ class _FrameLevelEvaluator:
             ``FloatTensor (B,)`` or length-B sequence of scalar scores.
         scenario_ids:
             length-B sequence of scenario path strings.
-        frame_ids:
-            length-B sequence of frame numbers.
+        timestep_ids:
+            length-B sequence of timestep numbers.
         """
         score_list = _as_float_list(scores)
-        for score, sid, fid in zip(score_list, scenario_ids, frame_ids):
+        for score, sid, tid in zip(score_list, scenario_ids, timestep_ids):
             labels = self._labels_for_scenario(sid)
             self._scores.append(score)
-            self._labels.append(bool(labels[int(fid)]))
+            self._labels.append(bool(labels[int(tid)]))
             self._types.append(_parse_anomaly_type(sid))
             self._scenario_ids.append(sid)
-            self._frame_ids.append(int(fid))
+            self._timestep_ids.append(int(tid))
 
     def _labels_for_scenario(self, scenario_id: str) -> np.ndarray:
         if scenario_id not in self._label_cache:
@@ -598,7 +602,7 @@ class _FrameLevelEvaluator:
         return self._label_cache[scenario_id]
 
     def max_per_scenario(self) -> Dict[str, float]:
-        """Reduce accumulated frame scores to one max score per scenario."""
+        """Reduce accumulated timestep scores to one max score per scenario."""
         out: Dict[str, float] = {}
         for score, sid in zip(self._scores, self._scenario_ids):
             if sid not in out or score > out[sid]:
@@ -608,7 +612,7 @@ class _FrameLevelEvaluator:
     def compute(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {
             "auroc": _auroc(self._scores, self._labels),
-            "n_frames": len(self._scores),
+            "n_timesteps": len(self._scores),
         }
         by_type = self._compute_by_type()
         if by_type:
@@ -630,14 +634,14 @@ class _FrameLevelEvaluator:
             combined_l = grouped_l[t] + normal_l
             out[t] = {
                 "auroc": _auroc(combined_s, combined_l),
-                "n_frames": len(grouped_s[t]),
+                "n_timesteps": len(grouped_s[t]),
             }
         return out
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame({
             "scenario_id": self._scenario_ids,
-            "frame_id": self._frame_ids,
+            "timestep_id": self._timestep_ids,
             "score": self._scores,
             "label": self._labels,
             "anomaly_type": self._types,
@@ -649,15 +653,16 @@ class _FrameLevelEvaluator:
         self._labels.clear()
         self._types.clear()
         self._scenario_ids.clear()
-        self._frame_ids.clear()
+        self._timestep_ids.clear()
         self._label_cache.clear()
 
 
-class SensorEvaluator(_FrameLevelEvaluator):
-    """Per-frame AUROC against sensor-specific labels.
+class SensorEvaluator(_PerTimestepEvaluator):
+    """Sensor-level AUROC: one score per sensor reading, against sensor-specific labels.
 
-    A frame is positive only if the anomaly is visible in this specific
-    sensor.  Labels come from ``{scenario_id}/anomaly-{sensor}/sensor.feather``.
+    A sensor reading (this sensor at one timestep) is positive only if the
+    anomaly is visible in this specific sensor.  Labels come from
+    ``{scenario_id}/anomaly-{sensor}/sensor.feather``.
 
     Parameters
     ----------
@@ -676,15 +681,17 @@ class SensorEvaluator(_FrameLevelEvaluator):
         return Path(scenario_id) / f"anomaly-{self.sensor}" / "sensor.feather"
 
 
-class ObservationEvaluator(_FrameLevelEvaluator):
-    """Per-frame AUROC against observation-level labels.
+class TimestepEvaluator(_PerTimestepEvaluator):
+    """Timestep-level AUROC against timestep-level labels.
 
-    The observation label marks whether the scene is anomalous at a given
-    timestep, independent of any single sensor.  It can fire when an anomaly is
-    visible to one or more sensors, when the sensors disagree, or for purely
-    semantic anomalies that no sensor localises (e.g. anomalous weather).
-    Labels come from ``{scenario_id}/anomaly-observation.feather``.  Accepts
-    fused multi-sensor scores; a scenario with 30 frames contributes 30 scores.
+    The timestep label marks whether the scene is anomalous at a given
+    timestep — all synchronized sensor readings treated as one multimodal
+    observation, independent of any single sensor.  It can fire when an
+    anomaly is visible to one or more sensors, when the sensors disagree, or
+    for purely semantic anomalies that no sensor localises (e.g. anomalous
+    weather).  Labels are stored on disk as
+    ``{scenario_id}/anomaly-observation.feather``.  Accepts fused multi-sensor
+    scores; a scenario with 30 timesteps contributes 30 scores.
     """
 
     def _label_path(self, scenario_id: str) -> Path:
@@ -692,7 +699,7 @@ class ObservationEvaluator(_FrameLevelEvaluator):
 
 
 # ---------------------------------------------------------------------------
-# Tier 4: Scenario: one score per scenario
+# Scenario level: one score per scenario
 # ---------------------------------------------------------------------------
 
 
@@ -702,8 +709,8 @@ class ScenarioEvaluator:
     The label is inferred from the scenario path (``/test/anomaly/`` is
     positive, ``/test/normal/`` is negative).  Each :meth:`update` takes one
     scalar score for the whole scenario; how that score is produced is up to the
-    caller and need not involve frame-level evaluation (e.g. a max over frame
-    scores, or a model that scores whole scenarios directly).
+    caller and need not involve timestep-level evaluation (e.g. a max over
+    timestep scores, or a model that scores whole scenarios directly).
     """
 
     def __init__(self) -> None:

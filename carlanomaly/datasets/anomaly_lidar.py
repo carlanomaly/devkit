@@ -9,7 +9,7 @@ from ._base import AtomicDataset
 
 
 class AnomalyLiDARDataset(AtomicDataset):
-    """Per-frame, per-point LiDAR anomaly labels.
+    """Per-timestep, per-point LiDAR anomaly labels.
 
     Returns a ``List[BoolTensor]`` of length T.  Each tensor has shape
     ``(N_points,)`` matching the corresponding point cloud.  For the train
@@ -23,9 +23,9 @@ class AnomalyLiDARDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> List[torch.Tensor]:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         labels = []
-        for f in frames:
+        for f in timesteps:
             if self._is_train:
                 pc_path = rec.path / "pointclouds" / f"{f:06d}.feather"
                 n_points = len(pd.read_feather(pc_path))
