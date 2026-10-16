@@ -23,12 +23,12 @@ Tiers
   AUPR, FPR@95TPR) pooled over every evaluated pixel/point in the split
   (anomalous frames, anomaly-free frames, and normal scenarios alike) using
   bounded-memory streaming histograms.
-- :class:`SensorEvaluator`: frame-level AUROC against sensor-specific labels
-  (``anomaly-{sensor}/sensor.feather``).
-- :class:`ObservationEvaluator`: frame-level AUROC against observation-level
-  labels (``anomaly-observation.feather``).
-- :class:`ScenarioEvaluator`: one score per scenario; label inferred from the
-  scenario path.
+- :class:`SensorEvaluator`: frame-level AUROC/AUPR/FPR@95TPR against
+  sensor-specific labels (``anomaly-{sensor}/sensor.feather``).
+- :class:`ObservationEvaluator`: frame-level AUROC/AUPR/FPR@95TPR against
+  observation-level labels (``anomaly-observation.feather``).
+- :class:`ScenarioEvaluator`: one score per scenario; AUROC/AUPR/FPR@95TPR,
+  label inferred from the scenario path.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torchmetrics.classification import BinaryAUROC
+from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
 from .index import CAMERAS
 
@@ -104,16 +104,25 @@ def _mean(values: Sequence[float]) -> float:
     return sum(valid) / len(valid) if valid else float("nan")
 
 
-def _auroc(scores: Sequence[float], labels: Sequence[bool]) -> float:
-    """AUROC over a flat list of scores/labels; NaN if labels are degenerate."""
+def _binary_metrics(scores: Sequence[float], labels: Sequence[bool]) -> Dict[str, float]:
+    """AUROC/AUPR/FPR@95TPR over a flat list of scores/labels.
+
+    Shared by the frame-level (:class:`SensorEvaluator`/:class:`ObservationEvaluator`)
+    and scenario-level (:class:`ScenarioEvaluator`) tiers, mirroring
+    :func:`_pooled_metrics`'s definitions (torchmetrics-convention AUPR, FPR at
+    the highest threshold still reaching TPR >= 0.95) but operating on raw
+    per-sample scores rather than histograms, since these tiers' sample counts
+    are small enough to not need bounded-memory binning. NaN for a degenerate
+    (single-class) problem.
+    """
     if not scores or all(labels) or not any(labels):
-        return float("nan")
-    metric = BinaryAUROC()
-    metric.update(
-        torch.as_tensor(scores, dtype=torch.float32),
-        torch.as_tensor(labels, dtype=torch.long),
-    )
-    return metric.compute().item()
+        return {"auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan")}
+    s = torch.as_tensor(scores, dtype=torch.float32)
+    l = torch.as_tensor(labels, dtype=torch.long)
+    auroc = BinaryAUROC()(s, l).item()
+    aupr = BinaryAveragePrecision()(s, l).item()
+    fpr95 = _fpr_at_tpr(s, l.bool())
+    return {"auroc": auroc, "aupr": aupr, "fpr95": fpr95}
 
 
 def _as_float_list(scores: Any) -> List[float]:
@@ -607,7 +616,7 @@ class _FrameLevelEvaluator:
 
     def compute(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {
-            "auroc": _auroc(self._scores, self._labels),
+            **_binary_metrics(self._scores, self._labels),
             "n_frames": len(self._scores),
         }
         by_type = self._compute_by_type()
@@ -629,7 +638,7 @@ class _FrameLevelEvaluator:
             combined_s = grouped_s[t] + normal_s
             combined_l = grouped_l[t] + normal_l
             out[t] = {
-                "auroc": _auroc(combined_s, combined_l),
+                **_binary_metrics(combined_s, combined_l),
                 "n_frames": len(grouped_s[t]),
             }
         return out
@@ -721,7 +730,7 @@ class ScenarioEvaluator:
 
     def compute(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {
-            "auroc": _auroc(self._scores, self._labels),
+            **_binary_metrics(self._scores, self._labels),
             "n_scenarios": len(self._scores),
         }
         normal_s = [s for s, t in zip(self._scores, self._types) if t is None]
@@ -735,7 +744,7 @@ class ScenarioEvaluator:
         by_type: Dict[str, Dict[str, float]] = {}
         for t in sorted(grouped_s):
             by_type[t] = {
-                "auroc": _auroc(grouped_s[t] + normal_s, grouped_l[t] + normal_l),
+                **_binary_metrics(grouped_s[t] + normal_s, grouped_l[t] + normal_l),
                 "n_scenarios": len(grouped_s[t]),
             }
         if by_type:

@@ -224,7 +224,11 @@ def test_scenario_evaluator_label_from_path():
     res = ev.compute()
     assert res["n_scenarios"] == 4
     assert res["auroc"] == pytest.approx(1.0)
+    # Perfect separation: AUPR is 1.0 and FPR95 is 0.0 too.
+    assert res["aupr"] == pytest.approx(1.0)
+    assert res["fpr95"] == pytest.approx(0.0)
     assert res["by_type"]["broken_light"]["n_scenarios"] == 2
+    assert res["by_type"]["broken_light"]["aupr"] == pytest.approx(1.0)
 
 
 def test_sensor_evaluator_frame_auroc(monkeypatch):
@@ -241,3 +245,6 @@ def test_sensor_evaluator_frame_auroc(monkeypatch):
     res = ev.compute()
     assert res["n_frames"] == 6
     assert res["auroc"] == pytest.approx(1.0)  # the one positive frame is top-scored
+    # Perfect separation here too.
+    assert res["aupr"] == pytest.approx(1.0)
+    assert res["fpr95"] == pytest.approx(0.0)
