@@ -44,7 +44,7 @@ DATA_BASE_URL = os.environ.get(
 #: directories each one contributes to a scenario (see ``package_dataset.sh``).
 PARTS: Dict[str, str] = {
     "base": "Front camera + segmentation, GNSS/IMU/weather/actions/collisions, "
-            "and (test only) front anomaly masks + observation labels.",
+            "and (test only) front anomaly masks + timestep labels.",
     "camera-extended": "Left/right/rear RGB + segmentation, and (test only) "
                        "their anomaly masks.",
     "lidar": "LiDAR point clouds, and (test only) per-point anomaly labels.",
@@ -98,27 +98,32 @@ _MODALITY_PART: Dict[str, str] = {
     "weather": "base",
     "actions": "base",
     "collisions": "base",
-    "anomaly_obs": "base",
+    "anomaly_timestep": "base",
+    "anomaly_sensor": "base",
+    "anomaly_scenario": "base",
     "kitti": "kitti",
     "carla_recordings": "carla-recordings",
 }
 
 # Camera modalities whose "front" direction is in `base` but whose other
 # directions live in `camera-extended`.
-_CAMERA_MODALITIES = {"rgb", "segmentation", "anomaly_seg"}
+_CAMERA_MODALITIES = {"rgb", "segmentation", "anomaly_seg", "anomaly_sensor"}
 
 
 def part_for(modality: str, direction: Optional[str] = None) -> str:
     """Return the archive part that contains a given modality/direction.
 
     Depth maps are bundled together regardless of camera direction; the RGB,
-    segmentation and pixel-anomaly modalities split by direction: ``front`` is
-    in ``base``, the other directions are in ``camera-extended``.
+    segmentation and anomaly-label modalities split by direction: ``front`` is
+    in ``base``, the other camera directions are in ``camera-extended``, and
+    sensor labels for ``lidar`` live in the ``lidar`` part.
     """
     if modality not in _MODALITY_PART:
         raise ValueError(
             f"unknown modality {modality!r}; expected one of {sorted(_MODALITY_PART)}"
         )
+    if modality == "anomaly_sensor" and direction == "lidar":
+        return "lidar"
     if modality in _CAMERA_MODALITIES and direction is not None and direction != "front":
         return "camera-extended"
     return _MODALITY_PART[modality]

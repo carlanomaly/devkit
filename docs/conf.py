@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ---------------------------------------------------------------------------
 
 project = "CarlAnomaly DevKit"
-author = "Konstantin Kirchheim"
-copyright = "2024, Konstantin Kirchheim"
+author = ""
+copyright = "2026"
 release = "0.1.0"
 version = "0.1"
 

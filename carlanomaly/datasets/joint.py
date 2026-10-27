@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from ..index import CAMERAS, ScenarioIndex
 from ._base import PathLike, ensure_parts_for, required_parts, resolve_index
 from .actions import ActionsDataset
-from .anomaly_obs import AnomalyObservationDataset
+from .anomaly_timestep import AnomalyTimestepDataset
 from .camera import CameraDataset
 from .collisions import CollisionsDataset
 from .gnss import GNSSDataset
@@ -22,7 +22,7 @@ class CarlAnomalyDataset(Dataset):
     """Joint dataset wrapping all modalities and all cameras.
 
     Returns a dict with prefixed camera keys (``front_rgb``, ``left_depth``,
-    etc.) plus tabular, LiDAR, and anomaly-observation entries.
+    etc.) plus tabular, LiDAR, and timestep-label entries.
 
     Use :func:`carlanomaly_collate_fn` as the DataLoader ``collate_fn``.
 
@@ -63,7 +63,7 @@ class CarlAnomalyDataset(Dataset):
                          for m in ("rgb", "depth", "segmentation", "anomaly_seg")]
                 specs += [(m, None) for m in ("pointcloud", "anomaly_lidar", "weather",
                                               "gnss", "imu", "actions", "collisions",
-                                              "anomaly_obs")]
+                                              "anomaly_timestep")]
                 parts = required_parts(specs)
             ensure_parts_for(root, split, index, parts,
                              verify=index_kwargs.get("download_verify", True))
@@ -82,7 +82,12 @@ class CarlAnomalyDataset(Dataset):
         self._imu = IMUDataset(index=index, download=False)
         self._actions = ActionsDataset(index=index, download=False)
         self._collisions = CollisionsDataset(index=index, download=False)
-        self._anomaly_obs = AnomalyObservationDataset(index=index, download=False)
+        self._anomaly_timestep = AnomalyTimestepDataset(index=index, download=False)
+
+    @property
+    def index(self) -> ScenarioIndex:
+        """The :class:`ScenarioIndex` this dataset is built on (shareable)."""
+        return self._index
 
     def __len__(self) -> int:
         return len(self._index)
@@ -94,8 +99,8 @@ class CarlAnomalyDataset(Dataset):
             "scenario_id": str(rec.path),
             "anomaly_type": rec.anomaly_type,
             "town": rec.town,
-            "frame_indices": torch.tensor(
-                self._index.frames_for(idx), dtype=torch.long
+            "timesteps": torch.tensor(
+                self._index.timesteps_for(idx), dtype=torch.long
             ),
         }
 
@@ -113,7 +118,7 @@ class CarlAnomalyDataset(Dataset):
         item["imu"] = self._imu[idx]
         item["actions"] = self._actions[idx]
         item["collisions"] = self._collisions[idx]
-        item["anomaly_observation"] = self._anomaly_obs[idx]
+        item["anomaly_timestep"] = self._anomaly_timestep[idx]
 
         if self.transform is not None:
             item = self.transform(item)

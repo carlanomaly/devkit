@@ -6,7 +6,7 @@ from ._base import AtomicDataset
 
 
 class ActionsDataset(AtomicDataset):
-    """Per-frame ego-vehicle control actions.
+    """Per-timestep ego-vehicle control actions.
 
     Returns a ``FloatTensor (T, 7)`` with columns: throttle, steer, brake,
     hand_brake, reverse, manual_gear_shift, gear.  Boolean columns are cast
@@ -17,7 +17,7 @@ class ActionsDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         arr = self._read_feather_cached(rec, "actions")
-        item = torch.from_numpy(arr[frames])  # (T, 7)
+        item = torch.from_numpy(arr[timesteps])  # (T, 7)
         return self._apply_transform(item)

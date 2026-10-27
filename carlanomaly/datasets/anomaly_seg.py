@@ -11,7 +11,7 @@ from ._base import AtomicDataset, PathLike
 
 
 class AnomalySegmentationDataset(AtomicDataset):
-    """Per-frame pixel-level anomaly masks from a single camera.
+    """Per-timestep pixel-level anomaly masks from a single camera.
 
     Returns a ``BoolTensor (T, H, W)``.  For the train split (where no
     anomaly masks exist), returns all-False tensors.
@@ -47,9 +47,9 @@ class AnomalySegmentationDataset(AtomicDataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         rec, _ = self._index[idx]
-        frames = self._index.frames_for(idx)
+        timesteps = self._index.timesteps_for(idx)
         masks = []
-        for f in frames:
+        for f in timesteps:
             if self._is_train:
                 masks.append(torch.zeros(
                     self._DEFAULT_H, self._DEFAULT_W, dtype=torch.bool

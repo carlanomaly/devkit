@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
+import torch
 from torch.utils.data import Dataset
 
 from ..index import ScenarioIndex
@@ -16,7 +17,8 @@ class LiDARDataset(Dataset):
     Wraps :class:`PointCloudDataset` and :class:`AnomalyLiDARDataset`.
 
     Returns a dict with keys ``'points'`` (``List[DataFrame]``) and
-    ``'anomaly_lidar'`` (``List[BoolTensor]``).
+    ``'anomaly_lidar'`` (``List[BoolTensor]``), plus the evaluator
+    identifiers ``'scenario_id'`` and ``'timesteps'``.
 
     Parameters
     ----------
@@ -58,11 +60,19 @@ class LiDARDataset(Dataset):
         self.pointcloud = PointCloudDataset(index=index, download=False)
         self.anomaly_lidar = AnomalyLiDARDataset(index=index, download=False)
 
+    @property
+    def index(self) -> ScenarioIndex:
+        """The :class:`ScenarioIndex` this dataset is built on (shareable)."""
+        return self._index
+
     def __len__(self) -> int:
         return len(self._index)
 
     def __getitem__(self, idx: int) -> Dict:
+        rec, _ = self._index[idx]
         item = {
+            "scenario_id": str(rec.path),
+            "timesteps": torch.tensor(self._index.timesteps_for(idx), dtype=torch.long),
             "points": self.pointcloud[idx],
             "anomaly_lidar": self.anomaly_lidar[idx],
         }

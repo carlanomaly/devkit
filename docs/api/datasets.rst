@@ -4,13 +4,13 @@ Datasets
 Every dataset takes the dataset ``root`` and a ``split`` and discovers its
 scenarios internally.  Datasets built from the same ``root``/``split`` (and
 ``clip_len``/``stride``) align index-for-index: ``dataset_a[i]`` and
-``dataset_b[i]`` refer to the same scenario and frame window.  Every dataset
-returns a time dimension ``T`` even when ``clip_len=1``.
+``dataset_b[i]`` refer to the same scenario and timestep window.  Every
+dataset returns a time dimension ``T`` even when ``clip_len=1``.
 
 .. currentmodule:: carlanomaly.datasets
 
-Atomic: image
---------------
+Camera
+------
 
 .. autoclass:: RGBDataset
    :members:
@@ -24,14 +24,23 @@ Atomic: image
    :members:
    :special-members: __len__, __getitem__
 
-.. autoclass:: AnomalySegmentationDataset
+LiDAR
+-----
+
+.. autoclass:: PointCloudDataset
    :members:
    :special-members: __len__, __getitem__
 
-Atomic: LiDAR
+Anomaly labels
 --------------
 
-.. autoclass:: PointCloudDataset
+Ground-truth labels for every evaluation level: per-pixel masks and per-point
+labels (sample level), per-sensor-reading labels (sensor level), per-timestep
+labels (timestep level), and per-scenario labels (scenario level).  The
+evaluators load these labels themselves; these datasets exist for inspection,
+visualisation, and custom evaluation.
+
+.. autoclass:: AnomalySegmentationDataset
    :members:
    :special-members: __len__, __getitem__
 
@@ -39,12 +48,20 @@ Atomic: LiDAR
    :members:
    :special-members: __len__, __getitem__
 
-.. autoclass:: AnomalyObservationDataset
+.. autoclass:: AnomalySensorDataset
    :members:
    :special-members: __len__, __getitem__
 
-Atomic: tabular
-----------------
+.. autoclass:: AnomalyTimestepDataset
+   :members:
+   :special-members: __len__, __getitem__
+
+.. autoclass:: AnomalyScenarioDataset
+   :members:
+   :special-members: __len__, __getitem__
+
+Tabular
+-------
 
 .. autoclass:: WeatherDataset
    :members:
@@ -69,6 +86,9 @@ Atomic: tabular
 Composite
 ---------
 
+Composite datasets return dicts that already include the evaluator
+identifiers ``scenario_id`` and ``timesteps``.
+
 .. autoclass:: CameraDataset
    :members:
    :special-members: __len__, __getitem__
@@ -82,3 +102,10 @@ Composite
    :special-members: __len__, __getitem__
 
 .. autofunction:: carlanomaly_collate_fn
+
+Utilities
+---------
+
+.. autoclass:: WithIdentifiers
+   :members:
+   :special-members: __len__, __getitem__

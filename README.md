@@ -6,7 +6,8 @@ simulator data.
 
 This package provides the tools to load the dataset and to evaluate your own
 model against the benchmark. The dataset itself is available from the
-[project website](https://carlanomaly.github.io/download/).
+[project website](https://carlanomaly.github.io/download/) and is fetched
+automatically on first use (`download=True`).
 
 ## Installation
 
@@ -16,37 +17,40 @@ pip install git+https://github.com/carlanomaly/devkit
 
 Requires Python ≥ 3.10 and PyTorch.
 
-## Overview
-
-- **`ScenarioIndex`** — discovers scenario directories for a split and builds a
-  flat sliding-window index of `(ScenarioRecord, frame_start)` tuples with
-  configurable `clip_len` and `stride`. All datasets that share an index align
-  on `dataset[i]`.
-- **Atomic datasets** (`carlanomaly.datasets`) — one per modality (RGB,
-  segmentation, depth, point clouds, anomaly masks, IMU/GNSS/weather/…). Each
-  takes a `ScenarioIndex` and an optional transform and returns a time
-  dimension `T`.
-- **Composite datasets** — `CameraDataset`, `LiDARDataset`, and
-  `CarlAnomalyDataset` (everything). The joint dataset uses
-  `carlanomaly_collate_fn` to handle variable-length point clouds and
-  collisions.
-- **Evaluators** (`carlanomaly.evaluator`) — streaming evaluation (update per
-  batch, compute at the end) at the **pixel**, **point**, **sensor**,
-  **observation**, and **scenario** tiers.
-
 ## Quick start
 
 ```python
-from carlanomaly import ScenarioIndex
-from carlanomaly.datasets.rgb import RGBDataset
+from carlanomaly.datasets import RGBDataset
 
-index = ScenarioIndex(root="/path/to/carlanomaly", split="test", clip_len=1)
-rgb = RGBDataset(index, camera="front")
-frame = rgb[0]  # FloatTensor (T, 3, H, W) in [0, 1]
+rgb = RGBDataset(root="/data/carlanomaly", split="test", direction="front")
+clip = rgb[0]  # FloatTensor (T, 3, H, W) in [0, 1]
 ```
 
-See the [baseline models](https://github.com/carlanomaly/baselines) for complete
-training and evaluation examples.
+Every dataset takes the dataset `root` and a `split` and discovers its
+scenarios internally. Datasets built from the same `root`/`split` (and
+`clip_len`/`stride`) align index-for-index: `rgb[i]` and `lidar[i]` refer to
+the same scenario and timestep window.
+
+## Overview
+
+- **Datasets** (`carlanomaly.datasets`) — one class per modality (RGB,
+  segmentation, depth, point clouds, anomaly labels, IMU/GNSS/weather/…), plus
+  composite datasets (`CameraDataset`, `LiDARDataset`, and `CarlAnomalyDataset`
+  for everything). Each returns a time dimension `T`.
+- **Evaluators** (`carlanomaly.evaluator`) — streaming metric accumulators
+  (update per batch, compute at the end) for the benchmark's four evaluation
+  levels:
+
+  | Level    | One score per …                | Evaluator                          |
+  |----------|--------------------------------|------------------------------------|
+  | Sample   | pixel / LiDAR point            | `PixelEvaluator`, `PointEvaluator` |
+  | Sensor   | sensor reading                 | `SensorEvaluator`                  |
+  | Timestep | timestep (all sensors jointly) | `TimestepEvaluator`                |
+  | Scenario | driving scenario               | `ScenarioEvaluator`                |
+
+See the [documentation](docs/) (`make -C docs html`) for the full evaluation
+protocol, and the [baseline models](https://github.com/carlanomaly/baselines)
+for complete training and evaluation examples.
 
 ## License
 
