@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
+from pytorch_ood.metrics import functional as ood_metrics
 
 from carlanomaly.evaluator import (
     PixelEvaluator,
@@ -18,7 +18,6 @@ from carlanomaly.evaluator import (
     ScenarioEvaluator,
     SensorEvaluator,
     _bin_indices,
-    _fpr_at_tpr,
     _pooled_metrics,
     _resolve_binning,
 )
@@ -39,6 +38,11 @@ def _histograms(scores: torch.Tensor, labels: torch.Tensor, n_bins: int = 65536,
     return pos, neg, clamped
 
 
+def _ood_labels(labels: torch.Tensor) -> torch.Tensor:
+    """Binary anomaly labels -> pytorch-ood convention (label < 0 is the positive class)."""
+    return torch.where(labels.bool(), -1, 0)
+
+
 def _make_scores_labels(n: int, seed: int):
     """Imbalanced binary problem with unbounded, partly-negative scores."""
     g = torch.Generator().manual_seed(seed)
@@ -53,14 +57,15 @@ def _make_scores_labels(n: int, seed: int):
 
 
 @pytest.mark.parametrize("seed", [0, 1, 7])
-def test_pooled_matches_torchmetrics(seed):
+def test_pooled_matches_exact(seed):
     scores, labels = _make_scores_labels(200_000, seed)
     pos, neg, _ = _histograms(scores, labels)
     m = _pooled_metrics(pos, neg)
 
-    ref_auroc = BinaryAUROC()(scores, labels).item()
-    ref_ap = BinaryAveragePrecision()(scores, labels).item()
-    ref_fpr = _fpr_at_tpr(scores, labels.bool())
+    ood_labels = _ood_labels(labels)
+    ref_auroc = ood_metrics.auroc(scores, ood_labels).item()
+    ref_ap = ood_metrics.aupr(scores, ood_labels, positive="ood").item()
+    ref_fpr = ood_metrics.fpr_at_tpr(scores, ood_labels, tpr=0.95).item()
 
     # 65536 asinh bins => agreement well below 1e-3.
     assert m["auroc"] == pytest.approx(ref_auroc, abs=1e-3)
@@ -130,7 +135,7 @@ def test_pooling_penalises_traffic_light_shortcut():
     norm_labels = torch.zeros(5 * 1000, dtype=torch.long)
 
     # Per-timestep macro over anomaly-containing timesteps (the biased metric).
-    macro = BinaryAUROC()(anom_scores, anom_labels).item()
+    macro = ood_metrics.auroc(anom_scores, _ood_labels(anom_labels)).item()
 
     # Pooled over all evaluated pixels (the fix).
     all_scores = torch.cat([anom_scores, norm_scores])
@@ -248,3 +253,53 @@ def test_sensor_evaluator_auroc(monkeypatch):
     # Perfect separation here too.
     assert res["aupr"] == pytest.approx(1.0)
     assert res["fpr95"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Raw-score metrics are exact for any score range
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_evaluator_large_scores_not_saturated():
+    """Regression: torchmetrics sigmoids scores outside [0, 1], so in float32 every
+    score above ~17 tied at 1.0 and AUROC came back 0.5 for a perfect ranking."""
+    ev = ScenarioEvaluator()
+    for score, sid in [
+        (20.0, NORM),
+        (25.0, "/data/test/normal/Town02/0001"),
+        (30.0, ANOM),
+        (35.0, "/data/test/anomaly/Town02/broken_light/0001"),
+        (40.0, "/data/test/anomaly/Town03/broken_light/0002"),
+    ]:
+        ev.update(score, sid)
+    res = ev.compute()
+    assert res["auroc"] == pytest.approx(1.0)
+    assert res["aupr"] == pytest.approx(1.0)
+    assert res["fpr95"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "shift, scale", [(0.0, 1.0), (1e3, 1.0), (0.0, -1e-9), (0.0, 1e6)]
+)
+def test_timestep_metrics_invariant_to_score_range(monkeypatch, shift, scale):
+    """Rank metrics must not change under shifting or rescaling the scores, including
+    into tiny negative values (which a float32 sigmoid squashes onto 0.5) and huge
+    ones (which it saturates). ``scale < 0`` flips the order, so that case is
+    compared against the negated scores."""
+    g = torch.Generator().manual_seed(0)
+    raw = torch.randn(400, generator=g).double()
+    labels = (raw + 0.8 * torch.randn(400, generator=g).double()) > 1.0
+    sids = [ANOM if i < 200 else NORM for i in range(400)]
+    fids = [i % 200 for i in range(400)]
+    label_arrays = {ANOM: labels[:200].numpy(), NORM: labels[200:].numpy()}
+
+    def run(scores):
+        ev = SensorEvaluator(sensor="front")
+        monkeypatch.setattr(ev, "_labels_for_scenario", lambda sid: label_arrays[sid])
+        ev.update(scores.tolist(), sids, fids)
+        return ev.compute()
+
+    ref = run(raw if scale > 0 else -raw)
+    res = run(raw * scale + shift)
+    for k in ("auroc", "aupr", "fpr95"):
+        assert res[k] == pytest.approx(ref[k], abs=1e-12)

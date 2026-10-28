@@ -47,7 +47,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
+from pytorch_ood.metrics import functional as ood_metrics
 
 from .index import CAMERAS, SENSORS
 
@@ -63,20 +63,6 @@ _DEFAULT_MAX_INFLIGHT = 32
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-
-def _fpr_at_tpr(scores: torch.Tensor, labels: torch.Tensor, tpr_target: float = 0.95) -> float:
-    """Compute FPR at a given TPR threshold."""
-    pos = labels.bool()
-    neg = ~pos
-    if pos.sum() == 0 or neg.sum() == 0:
-        return float("nan")
-
-    thresholds = torch.sort(scores[pos], descending=True).values
-    idx = max(0, int(tpr_target * pos.sum().item()) - 1)
-    threshold = thresholds[min(idx, len(thresholds) - 1)]
-    fpr = (scores[neg] >= threshold).float().mean().item()
-    return fpr
 
 
 def _parse_anomaly_type(scenario_id: str) -> Optional[str]:
@@ -108,21 +94,27 @@ def _binary_metrics(scores: Sequence[float], labels: Sequence[bool]) -> Dict[str
     """AUROC/AUPR/FPR@95TPR over a flat list of scores/labels.
 
     Shared by the timestep-level (:class:`SensorEvaluator`/:class:`TimestepEvaluator`)
-    and scenario-level (:class:`ScenarioEvaluator`) tiers, mirroring
-    :func:`_pooled_metrics`'s definitions (torchmetrics-convention AUPR, FPR at
-    the highest threshold still reaching TPR >= 0.95) but operating on raw
-    per-sample scores rather than histograms, since these tiers' sample counts
-    are small enough to not need bounded-memory binning. NaN for a degenerate
-    (single-class) problem.
+    and scenario-level (:class:`ScenarioEvaluator`) tiers, computed exactly with
+    pytorch-ood on the raw per-sample scores, since these tiers' sample counts
+    are small enough to not need bounded-memory binning.
+    :func:`_pooled_metrics` uses the same definitions (trapezoidal AUPR with
+    anomalies as the positive class, FPR at the highest threshold still
+    reaching TPR >= 0.95). NaN for a degenerate (single-class) problem.
+
+    Scores are used as given, in float64: torchmetrics' binary metrics instead
+    apply a sigmoid to scores outside [0, 1], which in float32 collapses large
+    (or tiny) scores into ties and changes the ranking.
     """
     if not scores or all(labels) or not any(labels):
         return {"auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan")}
-    s = torch.as_tensor(scores, dtype=torch.float32)
-    l = torch.as_tensor(labels, dtype=torch.long)
-    auroc = BinaryAUROC()(s, l).item()
-    aupr = BinaryAveragePrecision()(s, l).item()
-    fpr95 = _fpr_at_tpr(s, l.bool())
-    return {"auroc": auroc, "aupr": aupr, "fpr95": fpr95}
+    s = torch.as_tensor(scores, dtype=torch.float64)
+    # pytorch-ood convention: label < 0 marks the positive (anomalous) class.
+    l = torch.where(torch.as_tensor(labels, dtype=torch.bool), -1, 0)
+    return {
+        "auroc": ood_metrics.auroc(s, l).item(),
+        "aupr": ood_metrics.aupr(s, l, positive="ood").item(),
+        "fpr95": ood_metrics.fpr_at_tpr(s, l, tpr=0.95).item(),
+    }
 
 
 def _as_float_list(scores: Any) -> List[float]:
@@ -235,12 +227,15 @@ def _pooled_metrics(h_pos: torch.Tensor, h_neg: torch.Tensor) -> Dict[str, float
     fpr_curve = torch.cat([zero, torch.flip(fpr, [0])])
     auroc = torch.trapz(tpr_curve, fpr_curve).item()
 
-    # AUPR as step-interpolated average precision (torchmetrics/sklearn convention).
-    precision = tp / (tp + fp).clamp(min=1.0)
-    rec_f = torch.flip(tpr, [0])
-    prec_f = torch.flip(precision, [0])
-    rec_prev = torch.cat([zero, rec_f[:-1]])
-    aupr = ((rec_f - rec_prev) * prec_f).sum().item()
+    # AUPR by the trapezoidal rule, as pytorch-ood (and :func:`_binary_metrics`):
+    # one PR point per occupied bin (each bin is one threshold), ordered by
+    # decreasing recall, closed at (recall 0, precision 1).
+    occupied = (h_pos + h_neg) > 0
+    tp_o, fp_o = tp[occupied], fp[occupied]
+    one = torch.ones(1, dtype=torch.double)
+    precision = torch.cat([tp_o / (tp_o + fp_o), one])
+    recall = torch.cat([tp_o / n_pos, zero])
+    aupr = -torch.trapz(precision, recall).item()
 
     # FPR at the highest threshold still reaching TPR >= 0.95 (bin 0 always does).
     b_star = int((tpr >= 0.95).nonzero().max().item())

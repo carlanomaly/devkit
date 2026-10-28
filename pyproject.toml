@@ -17,7 +17,7 @@ dependencies = [
     "pyarrow",      # feather (.feather) support for pandas
     "Pillow",
     "torch",
-    "torchmetrics",
+    "pytorch-ood>=0.4.0",  # exact float64 AUROC/AUPR/FPR95 on any score range
 ]
 
 [project.optional-dependencies]

@@ -160,7 +160,10 @@ Reading the results
 - ``auroc`` / ``aupr`` / ``fpr95`` — metrics pooled over everything the
   evaluator has seen.  Evaluate the **full test split** (normal *and* anomaly
   scenarios); otherwise the negatives are unrepresentative and the numbers are
-  not comparable to the benchmark.
+  not comparable to the benchmark.  Anomalies are the positive class, AUPR is
+  the trapezoidal area under the precision-recall curve, and FPR95 is the
+  false positive rate at the highest threshold that reaches 95% TPR.  Scores
+  may lie in any range; the metrics depend only on their order.
 - ``by_type`` — the same metric per anomaly type, each computed against all
   normal data (sub-scenario levels report ``n_timesteps``; the scenario level
   reports ``n_scenarios``).
