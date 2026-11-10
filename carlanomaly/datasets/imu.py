@@ -6,11 +6,14 @@ from ._base import AtomicDataset
 
 
 class IMUDataset(AtomicDataset):
-    """Per-timestep inertial measurement unit readings.
+    """IMU readings of the ego vehicle.
 
-    Returns a ``FloatTensor (T, 7)`` with columns: acceleration_x,
-    acceleration_y, acceleration_z, compass, longitude_x, longitude_y,
-    longitude_z.
+    Each item is a ``FloatTensor (T, 7)`` with the columns
+
+    - ``acceleration_x``, ``acceleration_y``, ``acceleration_z``: in m/s²;
+    - ``compass``: heading in radians, clockwise from north;
+    - ``longitude_x``, ``longitude_y``, ``longitude_z``: despite their name,
+      the angular velocity around x, y and z in rad/s (the gyroscope).
     """
 
     modality = "imu"

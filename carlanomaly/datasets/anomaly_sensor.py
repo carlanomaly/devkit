@@ -11,18 +11,15 @@ from ._base import AtomicDataset
 
 
 class AnomalySensorDataset(AtomicDataset):
-    """Sensor-level anomaly labels for one sensor (one label per timestep).
+    """Whether the anomaly is visible to one sensor, per timestep.
 
-    Returns a ``BoolTensor (T,)`` marking whether the anomaly is visible in
-    this specific sensor at each timestep.  Labels are stored on disk as
-    ``anomaly-{sensor}/sensor.feather``.  For the train split (where no label
-    file exists), returns all-False.
+    Each item is a ``BoolTensor (T,)``. All ``False`` in the train split.
+    These are the labels :class:`~carlanomaly.SensorEvaluator` uses.
 
     Parameters
     ----------
     sensor:
-        Any sensor name (``"front"``, ``"left"``, ``"right"``, ``"rear"``,
-        ``"lidar"``).
+        ``"front"``, ``"left"``, ``"right"``, ``"rear"`` or ``"lidar"``.
     """
 
     modality = "anomaly_sensor"

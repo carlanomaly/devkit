@@ -6,9 +6,10 @@ from ._base import AtomicDataset
 
 
 class GNSSDataset(AtomicDataset):
-    """Per-timestep GNSS position.
+    """GNSS position of the ego vehicle.
 
-    Returns a ``FloatTensor (T, 3)`` with columns: altitude, latitude, longitude.
+    Each item is a ``FloatTensor (T, 3)`` with the columns ``altitude`` (metres),
+    ``latitude`` and ``longitude`` (degrees).
     """
 
     modality = "gnss"

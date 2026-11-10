@@ -6,13 +6,11 @@ from ._base import AtomicDataset
 
 
 class AnomalyScenarioDataset(AtomicDataset):
-    """Scenario-level anomaly labels (one label per scenario).
+    """Whether an item's scenario is an anomaly scenario.
 
-    Returns a scalar ``BoolTensor``: ``True`` iff the item's scenario is an
-    anomaly scenario.  The label is derived from the scenario's location in
-    the dataset layout (``test/anomaly/`` vs ``test/normal/``); no label file
-    is read.  Unlike the per-timestep datasets, the returned tensor has no
-    time dimension: the label applies to the scenario as a whole.
+    Each item is a scalar ``BoolTensor``, ``True`` for scenarios under
+    ``test/anomaly``. Unlike the other datasets, it has no time dimension. These
+    are the labels :class:`~carlanomaly.ScenarioEvaluator` uses.
     """
 
     modality = "anomaly_scenario"

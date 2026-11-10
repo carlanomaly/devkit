@@ -1,0 +1,110 @@
+{#- Adds a site-wide top header and footer to Furo's page layout, in the look of
+    carlanomaly.de. Below Furo's 63em breakpoint the header swaps tabs and search
+    field for buttons that open Furo's navigation and table-of-contents drawers;
+    see custom.css. Structure adapted from the pytorch-ood docs. -#}
+{% extends "!page.html" %}
+
+{#- `section` marks the link current on every page under it, e.g. "api/" -#}
+{%- macro nav_link(target, label, section=None) -%}
+  <a class="site-header-link"{% if pagename == target or (section and pagename.startswith(section)) %} aria-current="page"{% endif %} href="{{ pathto(target) }}">{{ label }}</a>
+{%- endmacro -%}
+
+{% block extrahead -%}
+{{ super() }}
+<link rel="icon" type="image/svg+xml" href="{{ pathto('_static/favicon.svg', 1) }}">
+<link rel="apple-touch-icon" href="{{ pathto('_static/apple-touch-icon.png', 1) }}">
+{%- endblock %}
+
+{% block body -%}
+<header class="site-header">
+  <div class="site-header-inner">
+    <label class="site-header-icon site-header-mobile" for="__navigation" aria-label="Open navigation">
+      <svg><use href="#svg-menu"></use></svg>
+    </label>
+    <a class="site-header-brand" href="{{ pathto(master_doc) }}">
+      {% include "logo.svg" %}
+      <span>CarlAnomaly <span class="site-header-product">DevKit</span></span>
+    </a>
+    {%- if release %}
+    <span class="site-header-version">v{{ release }}</span>
+    {%- endif %}
+
+    <nav class="site-header-nav" aria-label="Documentation">
+      {{ nav_link(master_doc, "Home") }}
+      {{ nav_link("install", "Install") }}
+      {{ nav_link("dataset", "Dataset") }}
+      {{ nav_link("loading-data", "Loading data") }}
+      {{ nav_link("evaluation", "Evaluation") }}
+      {{ nav_link("metrics", "Metrics") }}
+      {{ nav_link("api/datasets", "API", "api/") }}
+    </nav>
+
+    <div class="site-header-actions">
+      <a class="site-header-site" href="https://carlanomaly.de">carlanomaly.de<span aria-hidden="true"> ↗</span></a>
+      <button class="site-header-icon site-header-mobile site-header-search-button" aria-label="Search the docs">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
+      {#- search.js shows Pagefind results under the field as the reader types;
+          without the index (or JavaScript) the form opens Sphinx's search page. #}
+      <form class="site-header-search" action="{{ pathto('search') }}" method="get" role="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" name="q" placeholder="Search docs" aria-label="Search the docs" autocomplete="off"
+          role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list">
+        <kbd>Ctrl K</kbd>
+        <div class="search-results" id="search-results" role="listbox" aria-label="Search results" hidden></div>
+      </form>
+      <div class="site-header-icons">
+        <a class="site-header-icon" href="https://github.com/carlanomaly/devkit" aria-label="Dev kit on GitHub">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+        <button class="theme-toggle site-header-icon" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+        {%- if not furo_hide_toc %}
+        <label class="site-header-icon site-header-mobile" for="__toc" aria-label="Open table of contents">
+          <svg><use href="#svg-toc"></use></svg>
+        </label>
+        {%- endif %}
+      </div>
+    </div>
+  </div>
+</header>
+{{ super() }}
+{%- endblock %}
+
+{#- Pagefind indexes only the article of real pages, not the search page,
+    the indices or the highlighted module sources. #}
+{% block content -%}
+{%- if pagename in ("search", "genindex", "py-modindex") or pagename.startswith("_modules/") -%}
+{{ super() }}
+{%- else -%}
+<div data-pagefind-body>{{ super() }}</div>
+{%- endif -%}
+{%- endblock %}
+
+{% block footer -%}
+{{ super() }}
+<div class="site-footer">
+  <div class="site-footer-main">
+    <div class="site-footer-about">
+      <p class="site-footer-name">CarlAnomaly DevKit</p>
+      <p>Data loading and evaluation for the CarlAnomaly benchmark. Released under the
+        <a href="https://github.com/carlanomaly/devkit/blob/main/LICENSE">MIT license</a>.</p>
+    </div>
+    <nav class="site-footer-links" aria-label="Footer">
+      <ul>
+        <li><a href="https://carlanomaly.de">Project website</a></li>
+        <li><a href="https://github.com/carlanomaly/devkit">GitHub</a></li>
+        <li><a href="https://github.com/carlanomaly/devkit/issues">Issues</a></li>
+      </ul>
+      <ul>
+        <li><a href="https://carlanomaly.de/legal-notice/">Legal notice</a></li>
+        <li><a href="https://carlanomaly.de/privacy/">Privacy policy</a></li>
+      </ul>
+    </nav>
+  </div>
+</div>
+{%- endblock footer %}

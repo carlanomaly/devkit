@@ -6,11 +6,12 @@ from ._base import AtomicDataset
 
 
 class ActionsDataset(AtomicDataset):
-    """Per-timestep ego-vehicle control actions.
+    """Control commands of the ego vehicle's autopilot.
 
-    Returns a ``FloatTensor (T, 7)`` with columns: throttle, steer, brake,
-    hand_brake, reverse, manual_gear_shift, gear.  Boolean columns are cast
-    to float.
+    Each item is a ``FloatTensor (T, 7)`` with the columns ``throttle`` and
+    ``brake`` (0 to 1), ``steer`` (-1 to 1), ``hand_brake``, ``reverse``,
+    ``manual_gear_shift`` (0 or 1) and ``gear``. The command of timestep ``t``
+    is the one applied after the sensors recorded it.
     """
 
     modality = "actions"

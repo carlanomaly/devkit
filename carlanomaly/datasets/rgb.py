@@ -11,15 +11,16 @@ from ._base import AtomicDataset, PathLike
 
 
 class RGBDataset(AtomicDataset):
-    """Per-timestep RGB images from a single camera.
+    """RGB images from one camera.
 
-    Returns a ``FloatTensor (T, 3, H, W)`` in ``[0, 1]``.
+    Each item is a ``FloatTensor (T, 3, 1080, 1920)`` with channels in RGB order
+    and values in ``[0, 1]``.
 
-    The required archive parts are fetched into ``root`` automatically (``front``
-    lives in ``base``; other directions add ``camera-extended``); pass
-    ``download=False`` to skip.  Remaining keyword arguments (``clip_len``,
-    ``stride``, ``parts``, ...) are forwarded to
-    :class:`~carlanomaly.index.ScenarioIndex`.
+    Example
+    -------
+    >>> rgb = RGBDataset("/data/carlanomaly", split="train", direction="left")
+    >>> rgb[0].shape
+    torch.Size([1, 3, 1080, 1920])
     """
 
     modality = "rgb"
@@ -32,7 +33,7 @@ class RGBDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(

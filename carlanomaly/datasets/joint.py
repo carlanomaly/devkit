@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..index import CAMERAS, ScenarioIndex
-from ._base import PathLike, ensure_parts_for, required_parts, resolve_index
+from ._base import PathLike, check_parts_for, ensure_parts_for, required_parts, resolve_index
 from .actions import ActionsDataset
 from .anomaly_timestep import AnomalyTimestepDataset
 from .camera import CameraDataset
@@ -19,30 +19,25 @@ from .weather import WeatherDataset
 
 
 class CarlAnomalyDataset(Dataset):
-    """Joint dataset wrapping all modalities and all cameras.
+    """Every sensor, every label and the vehicle data in one item.
 
-    Returns a dict with prefixed camera keys (``front_rgb``, ``left_depth``,
-    etc.) plus tabular, LiDAR, and timestep-label entries.
+    Use it for detectors that combine many inputs; it needs every part except
+    ``kitti``. Each item is a dict with the keys
 
-    Use :func:`carlanomaly_collate_fn` as the DataLoader ``collate_fn``.
+    - ``"{camera}_{key}"`` for each camera in ``cameras`` and each key of
+      :class:`CameraDataset`, e.g. ``"front_rgb"`` or ``"left_anomaly_mask"``;
+    - ``"points"``, ``"anomaly_lidar"``: as in :class:`LiDARDataset`;
+    - ``"weather"``, ``"gnss"``, ``"imu"``, ``"actions"``, ``"collisions"``,
+      ``"anomaly_timestep"``: the items of the matching datasets;
+    - ``"scenario_id"``, ``"timesteps"``, ``"anomaly_type"`` (``None`` for
+      normal scenarios) and ``"town"``.
+
+    Batch it with :func:`carlanomaly_collate_fn`.
 
     Parameters
     ----------
-    root:
-        Path to the CarlAnomaly dataset directory.
-    split:
-        ``'train'``, ``'test_normal'``, ``'test_anomaly'``, or ``'test'``.
     cameras:
-        Camera directions to include.  Defaults to all four.
-    transform:
-        Optional transform applied to the merged output dict.
-    download:
-        If ``True``, fetch every archive part this joint dataset needs
-        (``base``, ``depth``, ``lidar``, plus ``camera-extended`` when any
-        non-front camera is included) into ``root`` before loading.
-
-    Additional keyword arguments (``clip_len``, ``stride``, ``parts``, ...)
-    are forwarded to :class:`~carlanomaly.index.ScenarioIndex`.
+        The cameras to include. Default: all four. Fewer cameras load faster.
     """
 
     def __init__(
@@ -53,20 +48,22 @@ class CarlAnomalyDataset(Dataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
+        parts = index_kwargs.pop("parts", None)
+        if parts is None:
+            specs = [(m, cam) for cam in cameras
+                     for m in ("rgb", "depth", "segmentation", "anomaly_seg")]
+            specs += [(m, None) for m in ("pointcloud", "anomaly_lidar", "weather",
+                                          "gnss", "imu", "actions", "collisions",
+                                          "anomaly_timestep")]
+            parts = required_parts(specs)
         if download:
-            parts = index_kwargs.pop("parts", None)
-            if parts is None:
-                specs = [(m, cam) for cam in cameras
-                         for m in ("rgb", "depth", "segmentation", "anomaly_seg")]
-                specs += [(m, None) for m in ("pointcloud", "anomaly_lidar", "weather",
-                                              "gnss", "imu", "actions", "collisions",
-                                              "anomaly_timestep")]
-                parts = required_parts(specs)
             ensure_parts_for(root, split, index, parts,
                              verify=index_kwargs.get("download_verify", True))
+        elif index is None:
+            check_parts_for(root, split, parts)
         index = resolve_index(root, split, index=index, download=False, **index_kwargs)
         self._index = index
         self.cameras = list(cameras)
@@ -126,12 +123,17 @@ class CarlAnomalyDataset(Dataset):
 
 
 def carlanomaly_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Custom collate function for :class:`CarlAnomalyDataset`.
+    """Collate function for items that hold lists, DataFrames or strings.
 
-    - Stacks :class:`torch.Tensor` values along a new batch dimension.
-    - Keeps ``List``, ``str``, ``None``, and ``pd.DataFrame`` values as
-      plain Python lists.
-    - Recurses into dicts.
+    Pass it as ``collate_fn`` to a ``DataLoader`` for datasets whose items vary
+    in size: point clouds, LiDAR labels, collisions and the combined datasets.
+    Tensors are stacked along a new batch dimension, dicts are batched key by
+    key, and everything else becomes a list with one entry per item.
+
+    Example
+    -------
+    >>> loader = DataLoader(LiDARDataset(root, split="test"), batch_size=8,
+    ...                     collate_fn=carlanomaly_collate_fn)
     """
     if not batch:
         return {}

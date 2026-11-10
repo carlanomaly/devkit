@@ -8,12 +8,15 @@ from ._base import AtomicDataset
 
 
 class CollisionsDataset(AtomicDataset):
-    """Per-timestep collision events (sparse).
+    """Collisions of the ego vehicle.
 
-    Returns a ``List[pd.DataFrame]`` of length T.  Each DataFrame contains
-    zero or more rows with columns: ego_id, ego_type, other_id, other_type,
-    normal_impulse_x, normal_impulse_y, normal_impulse_z, normal_impulse_norm.
-    Most timesteps have no collisions (empty DataFrame).
+    Each item is a list of ``T`` DataFrames, one per timestep, with one row per
+    collision (usually none) and the columns ``frame`` (the timestep), ``ego_id``, ``ego_type``,
+    ``other_id``, ``other_type`` (the actor hit) and ``normal_impulse_x``,
+    ``normal_impulse_y``, ``normal_impulse_z``, ``normal_impulse_norm`` (the
+    impulse of the collision).
+
+    Batch it with :func:`carlanomaly_collate_fn`.
     """
 
     modality = "collisions"

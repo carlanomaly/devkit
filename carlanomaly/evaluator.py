@@ -21,16 +21,24 @@ paths (``{timestep_id:06d}.png`` / ``.feather``).
 Levels
 ------
 - :class:`PixelEvaluator` / :class:`PointEvaluator` (sample level): metrics
-  (AUROC, AUPR, FPR@95TPR) pooled over every evaluated pixel/point in the
+  (AUROC, AUPR, AP, FPR@95TPR) pooled over every evaluated pixel/point in the
   split (anomalous timesteps, anomaly-free timesteps, and normal scenarios
   alike) using bounded-memory streaming histograms.
-- :class:`SensorEvaluator` (sensor level): per-timestep AUROC/AUPR/FPR@95TPR
+- :class:`SensorEvaluator` (sensor level): per-timestep AUROC/AUPR/AP/FPR@95TPR
   against sensor-specific labels (``anomaly-{sensor}/sensor.feather``).
 - :class:`TimestepEvaluator` (timestep level): per-timestep
-  AUROC/AUPR/FPR@95TPR against timestep-level labels (stored on disk as
-  ``anomaly-observation.feather``).
+  AUROC/AUPR/AP/FPR@95TPR against timestep-level labels (stored on disk as
+  ``anomaly-observation.feather``).  Both per-timestep evaluators also report
+  the time to detection at a false-alarm rate fixed on the normal scenarios.
 - :class:`ScenarioEvaluator` (scenario level): one score per scenario;
-  AUROC/AUPR/FPR@95TPR, label inferred from the scenario path.
+  AUROC/AUPR/AP/FPR@95TPR, label inferred from the scenario path.
+
+AUPR is the area under the precision-recall curve by the trapezoidal rule,
+AP the average precision (the same curve as a step function, as
+``sklearn.metrics.average_precision_score``).  They agree for continuous
+scores, but the trapezoidal rule is optimistic for tied scores (binary
+indicators, saturated or binned scores): a constant score gets an AUPR of
+``(1 + pi) / 2`` and an AP of ``pi``, the fraction of positives.
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ import threading
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -59,29 +67,53 @@ _MASK_H, _MASK_W = 1080, 1920
 _DEFAULT_WORKERS = 32
 _DEFAULT_MAX_INFLIGHT = 32
 
+# Simulator ticks per second, for converting timestep differences to seconds.
+_TIMESTEPS_PER_SECOND = 10.0
+
+# Metric keys every evaluator reports (NaN for a degenerate problem).
+_METRICS = ("auroc", "aupr", "ap", "fpr95")
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
 
-def _parse_anomaly_type(scenario_id: str) -> Optional[str]:
-    """Extract anomaly type from a scenario path string.
+def _anomaly_parts(scenario_id: str) -> Optional[Tuple[str, ...]]:
+    """The path components after ``test/anomaly``, or ``None`` for other paths.
 
-    Expected patterns:
-        .../test/anomaly/{town}/{anomaly_type}/...
-        .../test/normal/{town}/...
+    Works on path components rather than on the string, so relative ids
+    (``test/anomaly/...`` from ``root="."``) and Windows paths parse too.
     """
-    match = re.search(r"/test/anomaly/[^/]+/([^/]+)/", scenario_id)
-    if match:
-        return match.group(1)
+    parts = Path(scenario_id).parts
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == "test" and parts[i + 1] == "anomaly":
+            return parts[i + 2:]
+    return None
+
+
+def _is_anomaly_scenario(scenario_id: str) -> bool:
+    """Whether the scenario lies under ``test/anomaly``."""
+    return _anomaly_parts(scenario_id) is not None
+
+
+def _parse_anomaly_type(scenario_id: str) -> Optional[str]:
+    """Extract the anomaly type from a scenario path.
+
+    Expected layouts:
+        .../test/anomaly/{town}/{anomaly_type}/{scenario}
+        .../test/normal/{town}/{scenario}  (no type: None)
+    """
+    rest = _anomaly_parts(scenario_id)
+    if rest is not None and len(rest) >= 3:
+        return rest[1]
     return None
 
 
 def _parse_town(scenario_id: str) -> Optional[str]:
-    match = re.search(r"/(Town\w+)/", scenario_id)
-    if match:
-        return match.group(1)
+    for part in Path(scenario_id).parts:
+        if re.fullmatch(r"Town\w+", part):
+            return part
     return None
 
 
@@ -91,28 +123,29 @@ def _mean(values: Sequence[float]) -> float:
 
 
 def _binary_metrics(scores: Sequence[float], labels: Sequence[bool]) -> Dict[str, float]:
-    """AUROC/AUPR/FPR@95TPR over a flat list of scores/labels.
+    """AUROC/AUPR/AP/FPR@95TPR over a flat list of scores/labels.
 
     Shared by the timestep-level (:class:`SensorEvaluator`/:class:`TimestepEvaluator`)
     and scenario-level (:class:`ScenarioEvaluator`) tiers, computed exactly with
     pytorch-ood on the raw per-sample scores, since these tiers' sample counts
     are small enough to not need bounded-memory binning.
-    :func:`_pooled_metrics` uses the same definitions (trapezoidal AUPR with
-    anomalies as the positive class, FPR at the highest threshold still
-    reaching TPR >= 0.95). NaN for a degenerate (single-class) problem.
+    :func:`_pooled_metrics` uses the same definitions (trapezoidal AUPR and
+    step-wise AP with anomalies as the positive class, FPR at the highest
+    threshold still reaching TPR >= 0.95). NaN for a degenerate (single-class) problem.
 
     Scores are used as given, in float64: torchmetrics' binary metrics instead
     apply a sigmoid to scores outside [0, 1], which in float32 collapses large
     (or tiny) scores into ties and changes the ranking.
     """
     if not scores or all(labels) or not any(labels):
-        return {"auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan")}
+        return dict.fromkeys(_METRICS, float("nan"))
     s = torch.as_tensor(scores, dtype=torch.float64)
     # pytorch-ood convention: label < 0 marks the positive (anomalous) class.
     l = torch.where(torch.as_tensor(labels, dtype=torch.bool), -1, 0)
     return {
         "auroc": ood_metrics.auroc(s, l).item(),
         "aupr": ood_metrics.aupr(s, l, positive="ood").item(),
+        "ap": ood_metrics.average_precision(s, l, positive="ood").item(),
         "fpr95": ood_metrics.fpr_at_tpr(s, l, tpr=0.95).item(),
     }
 
@@ -203,7 +236,7 @@ def _bin_indices(
 
 
 def _pooled_metrics(h_pos: torch.Tensor, h_neg: torch.Tensor) -> Dict[str, float]:
-    """AUROC / AUPR / FPR@95TPR from positive/negative score histograms.
+    """AUROC / AUPR / AP / FPR@95TPR from positive/negative score histograms.
 
     Bins are ordered low→high score. Returns NaN for a degenerate
     (single-class) histogram, mirroring :func:`_binary_metrics`.
@@ -213,7 +246,7 @@ def _pooled_metrics(h_pos: torch.Tensor, h_neg: torch.Tensor) -> Dict[str, float
     n_pos = h_pos.sum()
     n_neg = h_neg.sum()
     if n_pos == 0 or n_neg == 0:
-        return {"auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan")}
+        return dict.fromkeys(_METRICS, float("nan"))
 
     # Reverse-cumulative: tp[b] = #positives in bins >= b (i.e. threshold at bin b).
     tp = torch.flip(torch.cumsum(torch.flip(h_pos, [0]), 0), [0])
@@ -227,21 +260,24 @@ def _pooled_metrics(h_pos: torch.Tensor, h_neg: torch.Tensor) -> Dict[str, float
     fpr_curve = torch.cat([zero, torch.flip(fpr, [0])])
     auroc = torch.trapz(tpr_curve, fpr_curve).item()
 
-    # AUPR by the trapezoidal rule, as pytorch-ood (and :func:`_binary_metrics`):
-    # one PR point per occupied bin (each bin is one threshold), ordered by
-    # decreasing recall, closed at (recall 0, precision 1).
+    # PR curve in pytorch-ood's convention (as :func:`_binary_metrics`): one
+    # point per occupied bin (each bin is one threshold), ordered by
+    # decreasing recall, closed at (recall 0, precision 1).  Each bin is a
+    # block of ties, so AUPR (trapezoidal) is optimistic for coarse
+    # histograms, AP (step-wise) is not.
     occupied = (h_pos + h_neg) > 0
     tp_o, fp_o = tp[occupied], fp[occupied]
     one = torch.ones(1, dtype=torch.double)
     precision = torch.cat([tp_o / (tp_o + fp_o), one])
     recall = torch.cat([tp_o / n_pos, zero])
-    aupr = -torch.trapz(precision, recall).item()
+    aupr = ood_metrics.aupr_from_curve(precision, recall).item()
+    ap = ood_metrics.average_precision_from_curve(precision, recall).item()
 
     # FPR at the highest threshold still reaching TPR >= 0.95 (bin 0 always does).
     b_star = int((tpr >= 0.95).nonzero().max().item())
     fpr95 = (fp[b_star] / n_neg).item()
 
-    return {"auroc": auroc, "aupr": aupr, "fpr95": fpr95}
+    return {"auroc": auroc, "aupr": aupr, "ap": ap, "fpr95": fpr95}
 
 
 class _SampleLevelEvaluator:
@@ -261,7 +297,7 @@ class _SampleLevelEvaluator:
     tasks and ``compute()`` joins them, draining every outstanding future
     before aggregating.  Three views are derived from one set of histograms:
 
-    - **global** pooled AUROC/AUPR/FPR95 (the primary metric);
+    - **global** pooled AUROC/AUPR/AP/FPR95 (the primary metric);
     - **by_type** pooled metrics, grouped by anomaly type;
     - **scenario_macro**: per-scenario metrics averaged over scenarios that
       contain positives (an equal-per-scenario secondary diagnostic).
@@ -359,10 +395,16 @@ class _SampleLevelEvaluator:
         self._futures.clear()
 
     def compute(self) -> Dict[str, Any]:
+        """Return the metrics over all scores passed to :meth:`update` so far.
+
+        Keys: ``auroc``, ``aupr``, ``ap``, ``fpr95``, ``n_samples``,
+        ``n_positive``, ``clamped_fraction``, ``scenario_macro`` and
+        ``by_type``.  See :doc:`/metrics`.
+        """
         self._drain()
         if not self._by_type:
             return {
-                "auroc": float("nan"), "aupr": float("nan"), "fpr95": float("nan"),
+                **dict.fromkeys(_METRICS, float("nan")),
                 "n_samples": 0, "n_positive": 0, "clamped_fraction": float("nan"),
             }
 
@@ -379,16 +421,15 @@ class _SampleLevelEvaluator:
         )
 
         # Scenario-macro: average over scenarios that contain both classes.
-        s_auroc, s_aupr, s_fpr95 = [], [], []
+        per_scenario: Dict[str, List[float]] = {k: [] for k in _METRICS}
         for pos, neg in self._by_scenario.values():
             m = _pooled_metrics(pos, neg)
             if m["auroc"] == m["auroc"]:  # not NaN -> scenario has positives and negatives
-                s_auroc.append(m["auroc"])
-                s_aupr.append(m["aupr"])
-                s_fpr95.append(m["fpr95"])
+                for k in _METRICS:
+                    per_scenario[k].append(m[k])
         results["scenario_macro"] = {
-            "auroc": _mean(s_auroc), "aupr": _mean(s_aupr),
-            "fpr95": _mean(s_fpr95), "n_scenarios": len(s_auroc),
+            **{k: _mean(v) for k, v in per_scenario.items()},
+            "n_scenarios": len(per_scenario["auroc"]),
         }
 
         by_type: Dict[str, Dict[str, float]] = {}
@@ -402,6 +443,7 @@ class _SampleLevelEvaluator:
         return results
 
     def reset(self) -> None:
+        """Discard all accumulated scores."""
         for fut in self._futures:  # let outstanding workers finish before clearing
             fut.result()
         self._futures.clear()
@@ -412,29 +454,46 @@ class _SampleLevelEvaluator:
 
 
 class PixelEvaluator(_SampleLevelEvaluator):
-    """Sample-level metrics over per-pixel scores of one camera, pooled over the split.
+    """Sample-level metrics for per-pixel scores of one camera.
 
-    Loads ground-truth masks from
-    ``{scenario_id}/anomaly-{sensor}/{timestep_id:06d}.png`` (any non-zero pixel
-    is anomalous); a missing mask counts as all-negative.
+    Use it for detectors that localise anomalies in camera images.  All
+    pixels passed to :meth:`update` form one pool: the pixels on anomalous
+    objects are the positives, all others, from anomaly and normal scenarios
+    alike, the negatives.  The ground-truth masks are those of
+    :class:`~carlanomaly.datasets.AnomalySegmentationDataset`, loaded from the
+    dataset.
+
+    Scores are counted in histograms, so memory stays constant over the test
+    split (see :doc:`/metrics`).
+
+    Example
+    -------
+    >>> evaluator = PixelEvaluator(sensor="front")
+    >>> for batch in loader:  # a WithIdentifiers(RGBDataset(...)) loader
+    ...     scores = model(batch["data"][:, 0])  # (B, 1080, 1920)
+    ...     evaluator.update(scores, batch["scenario_id"], batch["timesteps"][:, 0])
+    >>> evaluator.compute()["auroc"]
 
     Parameters
     ----------
     sensor:
-        Camera direction (``"front"``, ``"left"``, ``"right"``, ``"rear"``).
+        Camera: ``"front"``, ``"left"``, ``"right"`` or ``"rear"``.
     num_workers:
-        Worker threads that decode masks and bin scores off the main loop.
+        Threads that load masks and bin scores in the background.
     max_inflight:
-        Maximum timesteps queued at once; bounds retained host and GPU memory.
+        Maximum number of timesteps waiting to be processed; bounds memory use.
     n_bins:
-        Bins for the global and per-type score histograms.
+        Histogram bins for the pooled metrics.
     scenario_bins:
-        Bins for the per-scenario histograms; must divide ``n_bins``.
+        Histogram bins per scenario, for ``scenario_macro``; must divide
+        ``n_bins``.
     score_transform:
-        Strictly monotonic map applied to scores before binning; defaults to
-        ``asinh``, which handles unbounded scores without tuning.
+        Strictly increasing function applied to the scores before binning.
+        Default: ``asinh``, which suits unbounded scores.
     score_range:
-        ``(lo, hi)`` covered by the histogram after ``score_transform``.
+        ``(low, high)`` range of the histogram, after ``score_transform``.
+        Default: wide enough for any score up to ``1e6`` in magnitude with the
+        default transform, ``(0, 1)`` with a custom one.
     """
 
     def __init__(
@@ -463,21 +522,17 @@ class PixelEvaluator(_SampleLevelEvaluator):
         scenario_ids: Sequence[str],
         timestep_ids: Sequence[int],
     ) -> None:
-        """Accumulate one batch of per-pixel scores.
-
-        Scores stay on their source device (the model's GPU); each timestep's
-        mask decode + GPU metric computation is handed to a worker thread.  Each
-        timestep's score slice is cloned so the full batch tensor can be freed
-        immediately, bounding retained GPU memory to ``max_inflight`` timesteps.
+        """Add the scores of one batch.
 
         Parameters
         ----------
         pixel_scores:
-            ``FloatTensor (B, H, W)`` of per-pixel anomaly scores.
+            ``(B, H, W)`` anomaly scores at the camera's resolution
+            (1080 × 1920); higher means more anomalous.  They may stay on the GPU.
         scenario_ids:
-            length-B sequence of scenario path strings (see module docstring).
+            The scenario of each item.
         timestep_ids:
-            length-B sequence of integer timestep numbers.
+            The timestep of each item.
         """
         ps = pixel_scores.detach().float()
         for i in range(ps.shape[0]):
@@ -498,14 +553,12 @@ class PixelEvaluator(_SampleLevelEvaluator):
 
 
 class PointEvaluator(_SampleLevelEvaluator):
-    """Sample-level metrics over per-point LiDAR scores, pooled over the split.
+    """Sample-level metrics for per-point LiDAR scores.
 
-    Loads ground-truth labels from
-    ``{scenario_id}/anomaly-lidar/{timestep_id:06d}.feather`` (``anomaly`` column)
-    and handles variable-length point clouds.  Constructor parameters
-    (``num_workers``, ``max_inflight``, ``n_bins``, ``scenario_bins``,
-    ``score_transform``, ``score_range``) match :class:`PixelEvaluator`; this
-    evaluator takes no ``sensor`` argument.
+    Use it for detectors that localise anomalies in the point clouds.  Works
+    like :class:`PixelEvaluator`, with the labels of
+    :class:`~carlanomaly.datasets.AnomalyLiDARDataset`, and takes the same
+    parameters except ``sensor``.
     """
 
     def update(
@@ -514,16 +567,17 @@ class PointEvaluator(_SampleLevelEvaluator):
         scenario_ids: Sequence[str],
         timestep_ids: Sequence[int],
     ) -> None:
-        """Accumulate one batch of per-point scores.
+        """Add the scores of one batch.
 
         Parameters
         ----------
         point_scores:
-            length-B sequence of ``FloatTensor (N_i,)`` per-point scores.
+            One ``(N,)`` tensor per item, a score for each point of its point
+            cloud, in the order of the point cloud.
         scenario_ids:
-            length-B sequence of scenario path strings (see module docstring).
+            The scenario of each item.
         timestep_ids:
-            length-B sequence of integer timestep numbers.
+            The timestep of each item.
         """
         for i, scores in enumerate(point_scores):
             s = scores.detach().float().reshape(-1).clone()
@@ -576,20 +630,20 @@ class _PerTimestepEvaluator:
 
     def update(
         self,
-        scores: Any,
+        scores: Union[torch.Tensor, Sequence[float]],
         scenario_ids: Sequence[str],
         timestep_ids: Sequence[int],
     ) -> None:
-        """Accumulate one batch of scalar per-timestep scores.
+        """Add the scores of one batch.
 
         Parameters
         ----------
         scores:
-            ``FloatTensor (B,)`` or length-B sequence of scalar scores.
+            One score per item, as a ``(B,)`` tensor or a sequence of floats.
         scenario_ids:
-            length-B sequence of scenario path strings.
+            The scenario of each item.
         timestep_ids:
-            length-B sequence of timestep numbers.
+            The timestep of each item.
         """
         score_list = _as_float_list(scores)
         for score, sid, tid in zip(score_list, scenario_ids, timestep_ids):
@@ -607,7 +661,10 @@ class _PerTimestepEvaluator:
         return self._label_cache[scenario_id]
 
     def max_per_scenario(self) -> Dict[str, float]:
-        """Reduce accumulated timestep scores to one max score per scenario."""
+        """Return each scenario's highest score, keyed by scenario id.
+
+        Pass the result to :class:`ScenarioEvaluator`.
+        """
         out: Dict[str, float] = {}
         for score, sid in zip(self._scores, self._scenario_ids):
             if sid not in out or score > out[sid]:
@@ -615,11 +672,111 @@ class _PerTimestepEvaluator:
         return out
 
     def compute(self) -> Dict[str, Any]:
+        """Return the metrics over all scores passed to :meth:`update` so far.
+
+        Keys: ``auroc``, ``aupr``, ``ap``, ``fpr95``, ``n_timesteps`` and
+        ``by_type``.  See :doc:`/metrics`.
+        """
         results: Dict[str, Any] = {
             **_binary_metrics(self._scores, self._labels),
             "n_timesteps": len(self._scores),
         }
         by_type = self._compute_by_type()
+        if by_type:
+            results["by_type"] = by_type
+        return results
+
+    def time_to_detection(self, max_false_alarm_rate: float = 0.01) -> Dict[str, Any]:
+        """Return how long the detector takes to raise an alarm once an anomaly starts.
+
+        Unlike :meth:`compute`, this needs a threshold. It is set on the
+        normal scenarios of the test split, like the operating point of
+        ``fpr95``: an alarm is a score strictly above the threshold, and the
+        threshold is the lowest value at which at most
+        ``floor(max_false_alarm_rate * n)`` of the ``n`` normal scenarios
+        raise an alarm anywhere. Ties at the threshold therefore never raise
+        an alarm, so a detector whose top score is shared by many normal
+        scenarios cannot use it.
+
+        In each anomaly scenario, the anomaly starts at the first anomalous
+        timestep of its labels, and the alarm is the first scored timestep
+        from then on above the threshold; alarms before the start are
+        ignored. Without an alarm, the delay runs to the scenario's last
+        timestep. Anomaly scenarios whose labels are never anomalous are
+        left out.
+
+        Parameters
+        ----------
+        max_false_alarm_rate:
+            The largest share of normal scenarios that may raise an alarm.
+
+        Returns
+        -------
+        dict
+            ``ttd``: the mean delay in seconds over all anomaly scenarios,
+            misses included; ``detection_rate``: the share of anomaly
+            scenarios with an alarm; ``false_alarm_rate``: the share of
+            normal scenarios with an alarm, at most ``max_false_alarm_rate``;
+            ``threshold``; ``n_scenarios``: the anomaly scenarios averaged
+            over; ``n_normal_scenarios``; and ``by_type`` with ``ttd``,
+            ``detection_rate`` and ``n_scenarios`` per anomaly type.
+
+        Raises
+        ------
+        ValueError
+            If no normal scenario has been scored.
+        """
+        if not 0.0 <= max_false_alarm_rate < 1.0:
+            raise ValueError(f"max_false_alarm_rate must be in [0, 1), got {max_false_alarm_rate}")
+        by_scenario: Dict[str, List[Tuple[int, float]]] = defaultdict(list)
+        for score, sid, tid in zip(self._scores, self._scenario_ids, self._timestep_ids):
+            by_scenario[sid].append((tid, score))
+
+        normal_max = sorted(
+            (max(s for _, s in ts) for sid, ts in by_scenario.items() if not _is_anomaly_scenario(sid)),
+            reverse=True,
+        )
+        if not normal_max:
+            raise ValueError("time_to_detection needs scores of normal scenarios to set the threshold")
+        n_normal = len(normal_max)
+        # The (k+1)-th highest normal maximum: only the k above it can exceed it.
+        threshold = normal_max[math.floor(max_false_alarm_rate * n_normal)]
+        n_false_alarms = sum(m > threshold for m in normal_max)
+
+        delays: Dict[Optional[str], List[float]] = defaultdict(list)
+        detected: Dict[Optional[str], List[bool]] = defaultdict(list)
+        for sid, ts in by_scenario.items():
+            if not _is_anomaly_scenario(sid):
+                continue
+            labels = self._labels_for_scenario(sid)
+            anomalous = np.flatnonzero(labels)
+            if len(anomalous) == 0:
+                continue
+            onset = int(anomalous[0])
+            alarms = [tid for tid, s in ts if tid >= onset and s > threshold]
+            alarm = min(alarms) if alarms else len(labels) - 1
+            atype = _parse_anomaly_type(sid)
+            delays[atype].append((alarm - onset) / _TIMESTEPS_PER_SECOND)
+            detected[atype].append(bool(alarms))
+
+        all_delays = [d for ds in delays.values() for d in ds]
+        all_detected = [d for ds in detected.values() for d in ds]
+        results: Dict[str, Any] = {
+            "ttd": _mean(all_delays),
+            "detection_rate": _mean([float(d) for d in all_detected]),
+            "false_alarm_rate": n_false_alarms / n_normal,
+            "threshold": threshold,
+            "n_scenarios": len(all_delays),
+            "n_normal_scenarios": n_normal,
+        }
+        by_type = {
+            t: {
+                "ttd": _mean(delays[t]),
+                "detection_rate": _mean([float(d) for d in detected[t]]),
+                "n_scenarios": len(delays[t]),
+            }
+            for t in sorted(t for t in delays if t is not None)
+        }
         if by_type:
             results["by_type"] = by_type
         return results
@@ -644,6 +801,11 @@ class _PerTimestepEvaluator:
         return out
 
     def to_dataframe(self) -> pd.DataFrame:
+        """Return the accumulated scores with their labels, one row per timestep.
+
+        Columns: ``scenario_id``, ``timestep_id``, ``score``, ``label``,
+        ``anomaly_type`` (``None`` for normal scenarios) and ``town``.
+        """
         return pd.DataFrame({
             "scenario_id": self._scenario_ids,
             "timestep_id": self._timestep_ids,
@@ -654,6 +816,7 @@ class _PerTimestepEvaluator:
         })
 
     def reset(self) -> None:
+        """Discard all accumulated scores."""
         self._scores.clear()
         self._labels.clear()
         self._types.clear()
@@ -663,17 +826,18 @@ class _PerTimestepEvaluator:
 
 
 class SensorEvaluator(_PerTimestepEvaluator):
-    """Sensor-level AUROC: one score per sensor reading, against sensor-specific labels.
+    """Sensor-level metrics: one score per reading of one sensor.
 
-    A sensor reading (this sensor at one timestep) is positive only if the
-    anomaly is visible in this specific sensor.  Labels come from
-    ``{scenario_id}/anomaly-{sensor}/sensor.feather``.
+    Use it for detectors that decide per camera image or point cloud whether
+    it shows an anomaly.  A timestep counts as anomalous while the anomaly is
+    visible to this sensor (the labels of
+    :class:`~carlanomaly.datasets.AnomalySensorDataset`).  Evaluate each
+    sensor with its own instance.
 
     Parameters
     ----------
     sensor:
-        Any sensor name (``"front"``, ``"left"``, ``"right"``, ``"rear"``,
-        ``"lidar"``).
+        ``"front"``, ``"left"``, ``"right"``, ``"rear"`` or ``"lidar"``.
     """
 
     def __init__(self, sensor: str) -> None:
@@ -687,16 +851,14 @@ class SensorEvaluator(_PerTimestepEvaluator):
 
 
 class TimestepEvaluator(_PerTimestepEvaluator):
-    """Timestep-level AUROC against timestep-level labels.
+    """Timestep-level metrics: one score per timestep for the whole scene.
 
-    The timestep label marks whether the scene is anomalous at a given
-    timestep — all synchronized sensor readings treated as one multimodal
-    observation, independent of any single sensor.  It can fire when an
-    anomaly is visible to one or more sensors, when the sensors disagree, or
-    for purely semantic anomalies that no sensor localises (e.g. anomalous
-    weather).  Labels are stored on disk as
-    ``{scenario_id}/anomaly-observation.feather``.  Accepts fused multi-sensor
-    scores; a scenario with 30 timesteps contributes 30 scores.
+    Use it for detectors that judge the scene as a whole, from one sensor or
+    several combined.  A timestep counts as anomalous while the anomaly is
+    going on, whether or not a sensor shows it (the labels of
+    :class:`~carlanomaly.datasets.AnomalyTimestepDataset`).  This is the
+    finest level at which anomalies without a location, such as a sudden
+    change of weather, are evaluated.
     """
 
     def _label_path(self, scenario_id: str) -> Path:
@@ -709,13 +871,20 @@ class TimestepEvaluator(_PerTimestepEvaluator):
 
 
 class ScenarioEvaluator:
-    """Scenario-level AUROC: one score per scenario.
+    """Scenario-level metrics: one score per scenario.
 
-    The label is inferred from the scenario path (``/test/anomaly/`` is
-    positive, ``/test/normal/`` is negative).  Each :meth:`update` takes one
-    scalar score for the whole scenario; how that score is produced is up to the
-    caller and need not involve timestep-level evaluation (e.g. a max over
-    timestep scores, or a model that scores whole scenarios directly).
+    Use it to evaluate whether a detector notices that anything anomalous
+    happened in a scenario.  Scenarios under ``test/anomaly`` count as
+    anomalous, those under ``test/normal`` as normal.  The score can come
+    from a detector that sees whole scenarios, or from timestep scores via
+    :meth:`TimestepEvaluator.max_per_scenario`.
+
+    Example
+    -------
+    >>> scenario_eval = ScenarioEvaluator()
+    >>> for scenario_id, score in timestep_eval.max_per_scenario().items():
+    ...     scenario_eval.update(score, scenario_id)
+    >>> scenario_eval.compute()["auroc"]
     """
 
     def __init__(self) -> None:
@@ -725,13 +894,26 @@ class ScenarioEvaluator:
         self._scenario_ids: List[str] = []
 
     def update(self, score: float, scenario_id: str) -> None:
-        """Accumulate one scenario's score; label inferred from path."""
+        """Add the score of one scenario.
+
+        Parameters
+        ----------
+        score:
+            The scenario's anomaly score; higher means more anomalous.
+        scenario_id:
+            The scenario's ``scenario_id``, as returned by the datasets.
+        """
         self._scores.append(float(score))
-        self._labels.append("/test/anomaly/" in scenario_id)
+        self._labels.append(_is_anomaly_scenario(scenario_id))
         self._types.append(_parse_anomaly_type(scenario_id))
         self._scenario_ids.append(scenario_id)
 
     def compute(self) -> Dict[str, Any]:
+        """Return the metrics over all scores passed to :meth:`update` so far.
+
+        Keys: ``auroc``, ``aupr``, ``ap``, ``fpr95``, ``n_scenarios`` and
+        ``by_type``.  See :doc:`/metrics`.
+        """
         results: Dict[str, Any] = {
             **_binary_metrics(self._scores, self._labels),
             "n_scenarios": len(self._scores),
@@ -755,6 +937,11 @@ class ScenarioEvaluator:
         return results
 
     def to_dataframe(self) -> pd.DataFrame:
+        """Return the accumulated scores with their labels, one row per scenario.
+
+        Columns: ``scenario_id``, ``score``, ``label``, ``anomaly_type``
+        (``None`` for normal scenarios) and ``town``.
+        """
         return pd.DataFrame({
             "scenario_id": self._scenario_ids,
             "score": self._scores,
@@ -764,6 +951,7 @@ class ScenarioEvaluator:
         })
 
     def reset(self) -> None:
+        """Discard all accumulated scores."""
         self._scores.clear()
         self._labels.clear()
         self._types.clear()

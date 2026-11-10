@@ -17,14 +17,18 @@ dependencies = [
     "pyarrow",      # feather (.feather) support for pandas
     "Pillow",
     "torch",
-    "pytorch-ood>=0.4.0",  # exact float64 AUROC/AUPR/FPR95 on any score range
+    # exact float64 AUROC/AUPR/AP/FPR95 on any score range; average_precision and the
+    # *_from_curve helpers are unreleased (dev branch), so pin the commit until 0.4.1
+    "pytorch-ood @ git+https://github.com/kkirchheim/pytorch-ood@ccae5511f99fcf23e08390616e3ca293a5907f16",
 ]
 
 [project.optional-dependencies]
 docs = [
     "sphinx>=7",
-    "furo",
+    # pinned: docs/_templates/page.html extends Furo's page template
+    "furo==2025.12.19",
     "sphinx-autodoc-typehints",
+    "pagefind[bin]>=1.5,<2",  # search index, built after the HTML (docs/conf.py)
 ]
 test = [
     "pytest>=7",
@@ -34,8 +38,12 @@ test = [
 carlanomaly-download = "carlanomaly.download:main"
 
 [project.urls]
-Homepage = "https://carlanomaly.github.io"
+Homepage = "https://carlanomaly.de"
+Documentation = "https://docs.carlanomaly.de"
 Repository = "https://github.com/carlanomaly/devkit"
+
+[tool.hatch.metadata]
+allow-direct-references = true  # the pytorch-ood git pin above
 
 [tool.hatch.build.targets.wheel]
 packages = ["carlanomaly"]

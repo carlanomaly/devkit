@@ -1,0 +1,907 @@
+/* Styling on top of Furo in the look of carlanomaly.de: ink on paper, Schibsted
+   Grotesk for text, JetBrains Mono for code, the site's navy ink and link blue.
+   The site's tokens (carlanomaly.github.io/assets/css/main.css) are copied below
+   and mapped onto Furo's CSS variables, so Furo's own components follow along;
+   the rules further down cover layout and details Furo has no variable for.
+   Structure adapted from the pytorch-ood docs. */
+
+/* Fonts are served from _static/fonts (the website's files) so readers'
+   browsers contact no third party. Both are under the SIL OFL; see the license
+   files next to them. */
+@font-face {
+    font-family: "Schibsted Grotesk";
+    font-style: normal;
+    font-weight: 400 900;
+    font-display: swap;
+    src: url("fonts/schibsted-grotesk-latin-wght-normal.woff2") format("woff2");
+}
+
+@font-face {
+    font-family: "Schibsted Grotesk";
+    font-style: italic;
+    font-weight: 400 900;
+    font-display: swap;
+    src: url("fonts/schibsted-grotesk-latin-wght-italic.woff2") format("woff2");
+}
+
+@font-face {
+    font-family: "JetBrains Mono";
+    font-style: normal;
+    font-weight: 100 800;
+    font-display: swap;
+    src: url("fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+}
+
+/* ---------------------------------------------------------------- palette -- */
+
+/* Site tokens. Dark values are defined twice because Furo resolves "auto"
+   through the media query and an explicit choice through the data-theme
+   attribute; keep both blocks identical (and in sync with the website). */
+body {
+    --paper: #ffffff;
+    --panel: #f1f4f8;
+    --rule: #d6dde6;
+    --rule-strong: #aab6c4;
+    --ink: #0c2140;
+    --ink-2: #44546b;
+    --ink-3: #66768c;
+    --link: #1f55a0;
+    --code-bg: #f1f4f8;
+    --focus: #1f55a0;
+    --syn-keyword: #7b3fb4;
+    --syn-string: #2d7d46;
+    --syn-number: #b4561a;
+    --syn-function: #1f55a0;
+    --syn-builtin: #0d7486;
+}
+
+@media (prefers-color-scheme: dark) {
+    body:not([data-theme="light"]) {
+        --paper: #0d1726;
+        --panel: #142236;
+        --rule: #24344b;
+        --rule-strong: #3d5170;
+        --ink: #e7edf5;
+        --ink-2: #aab7c9;
+        --ink-3: #8595ab;
+        --link: #8fb6ee;
+        --code-bg: #142236;
+        --focus: #8fb6ee;
+        --syn-keyword: #c4a0f0;
+        --syn-string: #8fd19e;
+        --syn-number: #f2a774;
+        --syn-function: #8fb6ee;
+        --syn-builtin: #7fd3e0;
+    }
+}
+
+body[data-theme="dark"] {
+    --paper: #0d1726;
+    --panel: #142236;
+    --rule: #24344b;
+    --rule-strong: #3d5170;
+    --ink: #e7edf5;
+    --ink-2: #aab7c9;
+    --ink-3: #8595ab;
+    --link: #8fb6ee;
+    --code-bg: #142236;
+    --focus: #8fb6ee;
+    --syn-keyword: #c4a0f0;
+    --syn-string: #8fd19e;
+    --syn-number: #f2a774;
+    --syn-function: #8fb6ee;
+    --syn-builtin: #7fd3e0;
+}
+
+/* Furo's variables, for both themes. The attribute selector matches the
+   specificity of Furo's dark-mode rules, which would otherwise win. */
+body,
+body[data-theme] {
+    --font-stack: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+    --font-stack--headings: var(--font-stack);
+    --font-stack--monospace: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    --radius-small: 6px;
+
+    --color-background-primary: var(--paper);
+    --color-background-secondary: var(--paper);
+    --color-background-hover: var(--panel);
+    --color-background-hover--transparent: transparent;
+    --color-background-border: var(--rule);
+    --color-background-item: var(--rule-strong);
+    --color-foreground-primary: var(--ink);
+    --color-foreground-secondary: var(--ink-2);
+    --color-foreground-muted: var(--ink-3);
+    --color-foreground-border: var(--rule-strong);
+    --color-brand-primary: var(--ink);
+    --color-brand-content: var(--link);
+    --color-brand-visited: var(--link);
+
+    --color-link: var(--link);
+    --color-link--hover: var(--link);
+    --color-link--visited: var(--link);
+    --color-link--visited--hover: var(--link);
+    --color-link-underline: color-mix(in srgb, var(--link) 40%, transparent);
+    --color-link-underline--hover: var(--link);
+    --color-link-underline--visited: color-mix(in srgb, var(--link) 40%, transparent);
+    --color-link-underline--visited--hover: var(--link);
+
+    --color-sidebar-background: var(--paper);
+    --color-sidebar-background-border: var(--rule);
+    --color-sidebar-caption-text: var(--ink);
+    --color-sidebar-link-text: var(--ink-3);
+    --color-sidebar-link-text--top-level: var(--ink-3);
+    --color-sidebar-item-background--current: transparent;
+    --color-sidebar-item-background--hover: transparent;
+    --color-sidebar-item-expander-background--hover: var(--panel);
+    --color-sidebar-search-background: var(--paper);
+    --color-sidebar-search-background--focus: var(--paper);
+    --color-sidebar-search-border: var(--rule);
+    --color-sidebar-search-icon: var(--ink-3);
+    --color-toc-background: var(--paper);
+    --color-toc-title-text: var(--ink);
+    --color-toc-item-text: var(--ink-3);
+    --color-toc-item-text--hover: var(--ink);
+    --color-toc-item-text--active: var(--ink);
+
+    --color-code-background: var(--code-bg);
+    --color-code-foreground: var(--ink);
+    --color-inline-code-background: var(--code-bg);
+    --color-highlighted-background: color-mix(in srgb, var(--link) 18%, transparent);
+    --color-highlight-on-target: color-mix(in srgb, var(--link) 14%, transparent);
+    --color-api-background: var(--panel);
+    --color-api-background-hover: var(--panel);
+    --color-api-name: var(--ink);
+    --color-api-pre-name: var(--ink-3);
+    --color-api-paren: var(--ink-3);
+    --color-api-keyword: var(--ink-3);
+    --color-table-header-background: transparent;
+    --color-table-border: var(--rule);
+    --color-admonition-background: var(--panel);
+    --color-card-background: var(--paper);
+    --color-card-border: var(--rule);
+    --color-card-marginals-background: var(--panel);
+}
+
+/* ------------------------------------------------------------- typography -- */
+
+body {
+    font-feature-settings: "kern", "liga";
+    -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+article {
+    line-height: 1.6;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    color: var(--ink);
+}
+
+h1 {
+    font-size: 2.25rem;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.035em;
+}
+
+h2 {
+    font-size: 1.625rem;
+    font-weight: 650;
+    letter-spacing: -0.025em;
+}
+
+h3 {
+    font-size: 1.25rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+}
+
+strong {
+    font-weight: 650;
+}
+
+a {
+    text-underline-offset: 0.18em;
+}
+
+/* ---------------------------------------------------------------- sidebar -- */
+
+/* Captions as on the website's "On this page" title: sentence case, ink. */
+.sidebar-tree .caption,
+.sidebar-tree :not(.caption) > .caption-text {
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink);
+}
+
+.sidebar-tree .reference {
+    font-size: 0.9375rem;
+}
+
+.sidebar-tree .reference:hover {
+    color: var(--ink);
+}
+
+/* Active entry: ink with a rule to its left, like the website's page TOC. */
+.sidebar-tree .current-page > .reference {
+    color: var(--ink);
+    font-weight: 500;
+    box-shadow: inset 2px 0 0 var(--ink);
+}
+
+.sidebar-tree li.toctree-l1 > ul {
+    border-left: 1px solid var(--rule);
+    margin-left: var(--sidebar-item-spacing-horizontal);
+}
+
+/* Right-hand TOC: a rule on the left, the active entry in ink. */
+.toc-tree {
+    border-left: 1px solid var(--rule);
+}
+
+.toc-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: none;
+}
+
+.toc-tree li.scroll-current > .reference {
+    font-weight: 500;
+}
+
+/* The search field (mobile drawer) is inset as a rounded box, so the
+   container's horizontal padding has to be added to Furo's icon offset. */
+.sidebar-search-container {
+    padding: 0.25rem var(--sidebar-item-spacing-horizontal) 0.75rem;
+    background: transparent;
+}
+
+.sidebar-search-container:hover,
+.sidebar-search-container:focus-within {
+    background: transparent;
+}
+
+.sidebar-search-container::before {
+    left: calc(2 * var(--sidebar-item-spacing-horizontal));
+    top: 0.25rem;
+    bottom: 0.75rem;
+    margin: auto 0;
+    z-index: 11;
+    pointer-events: none;
+}
+
+.sidebar-search {
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-small);
+    padding-left: calc(var(--sidebar-item-spacing-horizontal) + var(--sidebar-search-icon-size) + 0.5rem);
+}
+
+.sidebar-search:focus {
+    border-color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------------- code -- */
+
+code.literal,
+p code.literal {
+    padding: 0.08em 0.25em;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-variant-ligatures: none;
+}
+
+div[class*="highlight-"] {
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-small);
+}
+
+.highlight {
+    border-radius: var(--radius-small);
+}
+
+.highlight pre {
+    font-size: 0.8125rem;
+    line-height: 1.65;
+    font-variant-ligatures: none;
+}
+
+/* Syntax colours from the website instead of a Pygments style. Furo scopes
+   pygments.css as body[data-theme=...] .highlight; the [class] reset outranks
+   it, and the token rules after it outrank the reset. */
+body[data-theme] .highlight {
+    background: var(--code-bg);
+}
+
+body[data-theme] .highlight pre [class] {
+    color: inherit;
+    background: none;
+    font-style: normal;
+    font-weight: inherit;
+    text-decoration: none;
+    border: none;
+}
+
+body[data-theme] .highlight pre :is(.k, .kn, .kd, .kc, .ow, .kr) { color: var(--syn-keyword); }
+body[data-theme] .highlight pre :is(.s, .s1, .s2, .sa, .sb, .se, .sd, .si) { color: var(--syn-string); }
+body[data-theme] .highlight pre :is(.c, .c1, .cm, .ch) { color: var(--ink-3); font-style: italic; }
+body[data-theme] .highlight pre :is(.m, .mi, .mf, .mh) { color: var(--syn-number); }
+body[data-theme] .highlight pre :is(.nf, .fm) { color: var(--syn-function); }
+body[data-theme] .highlight pre :is(.nb, .bp) { color: var(--syn-builtin); }
+body[data-theme] .highlight pre :is(.o, .gp, .go) { color: var(--ink-2); }
+body[data-theme] .highlight pre .hll { background: var(--color-highlighted-background); }
+
+/* API signatures: a panel box with an ink rule on the left. */
+dl.py:not(.field-list) > dt {
+    background: var(--panel);
+    border-left: 2px solid var(--ink);
+    border-radius: 0 var(--radius-small) var(--radius-small) 0;
+    /* Furo wraps long signatures with a hanging indent (text-indent: -2.5em), so
+       only the vertical padding may change here. */
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+    font-size: 0.85rem;
+}
+
+dl.py:not(.field-list) > dt .sig-name {
+    color: var(--ink);
+}
+
+dl.py:not(.field-list) > dt .viewcode-link {
+    color: var(--link);
+}
+
+/* Field labels ("Parameters", "Returns"): small, muted, sentence case. The
+   second selector repeats Furo's rule for labels inside API entries. */
+.field-list > dt,
+dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple) .field-list > dt {
+    color: var(--ink-3);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.field-list > dt .colon {
+    display: none;
+}
+
+/* ----------------------------------------------------------------- tables -- */
+
+/* As the website's data tables: no box, rules between rows, ink under the head. */
+table.docutils {
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    border-collapse: collapse;
+    font-size: 0.9375rem;
+    line-height: 1.45;
+}
+
+/* The API overview's tables (autosummary) span the column, so they line up. */
+table.autosummary {
+    width: 100%;
+    margin-left: 0;
+}
+
+table.docutils th,
+table.docutils td {
+    padding: 9px 14px 9px 0;
+    border: none;
+    border-bottom: 1px solid var(--rule);
+    background: none;
+    vertical-align: top;
+}
+
+table.docutils th:first-child,
+table.docutils td:first-child {
+    border-left: none;
+}
+
+table.docutils thead th {
+    color: var(--ink-2);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: left;
+    border-bottom: 1px solid var(--ink);
+}
+
+/* ------------------------------------------------------------ admonitions -- */
+
+.admonition {
+    border-radius: var(--radius-small);
+    box-shadow: none;
+    border: 1px solid var(--rule);
+}
+
+/* ------------------------------------------------------------ site header -- */
+
+/* Sticky top bar from _templates/page.html, styled like the website's header.
+   Below Furo's 63em breakpoint it replaces Furo's mobile header: tabs and the
+   search field give way to buttons for Furo's navigation and TOC drawers. */
+body {
+    --site-header-height: 60px;
+}
+
+.site-header {
+    position: sticky;
+    top: 0;
+    z-index: 60;
+    height: var(--site-header-height);
+    background: color-mix(in srgb, var(--paper) 92%, transparent);
+    backdrop-filter: saturate(1.4) blur(10px);
+    -webkit-backdrop-filter: saturate(1.4) blur(10px);
+    border-bottom: 1px solid var(--rule);
+}
+
+.site-header-inner {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    height: 100%;
+    padding: 0 32px;
+}
+
+.site-header-brand,
+.site-header-brand:visited {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink);
+    font-size: 1.0625rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-decoration: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.site-header-brand .logo {
+    flex: none;
+}
+
+.site-header-product {
+    font-weight: 500;
+    color: var(--ink-2);
+}
+
+.site-header-version {
+    margin-left: -8px;
+    padding: 1px 7px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    color: var(--ink-3);
+    font-family: var(--font-stack--monospace);
+    font-size: 0.6875rem;
+    white-space: nowrap;
+}
+
+.site-header-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 8px;
+}
+
+.site-header-link,
+.site-header-link:visited {
+    display: block;
+    padding: 6px 12px;
+    border-radius: var(--radius-small);
+    color: var(--ink-2);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.site-header-link:hover {
+    color: var(--ink);
+    background: var(--panel);
+}
+
+/* Current page: ink, underlined, as on the website. */
+.site-header-link[aria-current="page"] {
+    color: var(--ink);
+    background: none;
+    border-radius: 0;
+    box-shadow: inset 0 -2px 0 var(--ink);
+}
+
+.site-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    min-width: 0;
+    margin-left: auto;
+}
+
+.site-header-site,
+.site-header-site:visited {
+    color: var(--ink-2);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.site-header-site:hover {
+    color: var(--ink);
+    text-decoration: underline;
+}
+
+.site-header-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 1 14rem;
+    min-width: 8rem;
+    height: 36px;
+    padding: 0 10px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-small);
+    background: var(--paper);
+}
+
+.site-header-search:focus-within {
+    border-color: var(--ink-2);
+}
+
+/* Results under the search field (search.js): grouped by page, one entry per
+   matching section with an excerpt. */
+.site-header-search {
+    position: relative;
+}
+
+.search-results {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: -1px;
+    z-index: 70;
+    width: min(34rem, calc(100vw - 32px));
+    max-height: min(70vh, 36rem);
+    overflow-y: auto;
+    padding: 6px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-small);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 12%, transparent);
+}
+
+.search-results[hidden] {
+    display: none;
+}
+
+.search-group + .search-group {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--rule);
+}
+
+.search-group-title {
+    padding: 4px 10px 2px;
+    color: var(--ink-3);
+    font-size: 0.8125rem;
+    font-weight: 600;
+}
+
+.search-result,
+.search-result:visited {
+    display: block;
+    padding: 6px 10px;
+    border-radius: 4px;
+    color: var(--ink);
+    text-decoration: none;
+}
+
+.search-result.is-active {
+    background: var(--panel);
+}
+
+.search-result-title {
+    display: block;
+    font-size: 0.9375rem;
+    font-weight: 500;
+}
+
+.search-result-excerpt {
+    display: block;
+    margin-top: 2px;
+    color: var(--ink-2);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+}
+
+.search-result-excerpt mark {
+    background: color-mix(in srgb, var(--link) 20%, transparent);
+    color: inherit;
+    border-radius: 2px;
+}
+
+.search-empty {
+    margin: 0;
+    padding: 10px;
+    color: var(--ink-2);
+    font-size: 0.875rem;
+}
+
+.site-header-search svg {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: var(--ink-3);
+    stroke-width: 2;
+    stroke-linecap: round;
+}
+
+.site-header-search input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.875rem;
+}
+
+.site-header-search input::placeholder {
+    color: var(--ink-3);
+}
+
+.site-header-search input::-webkit-search-cancel-button {
+    display: none;
+}
+
+.site-header-search kbd {
+    padding: 0 5px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    color: var(--ink-3);
+    background: transparent;
+    box-shadow: none;
+    font-family: var(--font-stack);
+    font-size: 0.6875rem;
+    white-space: nowrap;
+}
+
+/* GitHub and theme toggle behind a divider, as on the website. */
+.site-header-icons {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding-left: 10px;
+    border-left: 1px solid var(--rule);
+}
+
+.site-header-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-small);
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+}
+
+.site-header-icon:hover {
+    color: var(--ink);
+    background: var(--panel);
+}
+
+.site-header-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* Furo's theme toggle icons are stroked, the GitHub mark is filled. */
+.theme-toggle.site-header-icon svg {
+    color: inherit;
+    stroke: currentColor;
+}
+
+.site-header-mobile {
+    display: none;
+}
+
+@media (min-width: 63em) {
+    /* The header now carries brand, search and theme toggle. */
+    .sidebar-brand,
+    .sidebar-search-container,
+    .content-icon-container .theme-toggle-container {
+        display: none;
+    }
+
+    .sidebar-tree {
+        margin-top: 1.25rem;
+    }
+
+    /* Furo's sticky columns assume they start at the top of the viewport. */
+    .sidebar-sticky,
+    .toc-sticky {
+        top: var(--site-header-height);
+        height: calc(100vh - var(--site-header-height));
+    }
+}
+
+@media (max-width: 62.99em) {
+    /* Furo's drawers (z-index 30/50) and their overlays must cover the header. */
+    .site-header {
+        z-index: 15;
+    }
+
+    .site-header-inner {
+        gap: 4px;
+        padding: 0 8px;
+    }
+
+    .site-header-mobile {
+        display: inline-grid;
+    }
+
+    .site-header-nav,
+    .site-header-version,
+    .site-header-search,
+    .site-header-site {
+        display: none;
+    }
+
+    .site-header-actions,
+    .site-header-icons {
+        gap: 2px;
+    }
+
+    .site-header-icons {
+        padding-left: 0;
+        border-left: none;
+    }
+
+    .site-header-search-button svg {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+    }
+
+    .mobile-header {
+        display: none !important;
+    }
+
+    /* The search button opens the field over the header (site-header.js). */
+    .site-header.search-open .site-header-search {
+        display: flex;
+        position: absolute;
+        top: 11px;
+        left: 8px;
+        right: 8px;
+        min-width: 0;
+    }
+
+    .site-header-search kbd {
+        display: none;
+    }
+
+    .site-header-search .search-results {
+        right: -1px;
+        left: -1px;
+        width: auto;
+    }
+}
+
+/* Anchor targets land below the sticky header, at every screen size. */
+html {
+    scroll-padding-top: calc(var(--site-header-height) + 16px);
+}
+
+/* Between the mobile breakpoint and a comfortable desktop width, drop the
+   secondary bits first so the navigation never wraps. */
+@media (min-width: 63em) and (max-width: 82em) {
+    .site-header-inner {
+        gap: 12px;
+        padding: 0 16px;
+    }
+
+    .site-header-nav {
+        margin-left: 0;
+    }
+
+    .site-header-link {
+        padding: 6px 8px;
+    }
+
+    .site-header-version,
+    .site-header-site,
+    .site-header-search kbd {
+        display: none;
+    }
+}
+
+/* ------------------------------------------------------------ site footer -- */
+
+/* _templates/page.html appends this below Furo's previous/next links; it takes
+   over the copyright line of Furo's own footer bar. */
+.bottom-of-page {
+    display: none;
+}
+
+.site-footer {
+    margin-top: 40px;
+    padding: 28px 0 40px;
+    border-top: 1px solid var(--rule);
+    font-size: 0.9375rem;
+    color: var(--ink-2);
+}
+
+.site-footer-main {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px 48px;
+    justify-content: space-between;
+}
+
+.site-footer-about {
+    flex: 1 1 16rem;
+    max-width: 52ch;
+}
+
+.site-footer-about p {
+    margin: 0 0 6px;
+    line-height: 1.5;
+}
+
+.site-footer-name {
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.site-footer-about a,
+.site-footer-about a:visited {
+    color: var(--link);
+}
+
+.site-footer-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px 48px;
+}
+
+.site-footer-links ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.site-footer-links li + li {
+    margin-top: 6px;
+}
+
+.site-footer-links a,
+.site-footer-links a:visited {
+    color: var(--ink-2);
+    text-decoration: none;
+}
+
+.site-footer-links a:hover {
+    color: var(--ink);
+    text-decoration: underline;
+}
+
+/* Phones: the logo and "CarlAnomaly" fit next to the icons, "DevKit" does not. */
+@media (max-width: 26em) {
+    .site-header-product {
+        display: none;
+    }
+}

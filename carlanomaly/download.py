@@ -8,9 +8,11 @@ reconstructs the ``train/<town>/scenario-N/...`` / ``test/...`` layout that
 
 The high-level entry point is :func:`ensure_parts`, which is idempotent: it
 downloads (with HTTP-range resume), verifies the SHA-256 checksum, extracts, and
-writes a marker file so subsequent calls are no-ops.  It is invoked automatically
-when a :class:`ScenarioIndex` is constructed with ``download=True``; it can also
-be used directly or via ``python -m carlanomaly.download``.
+writes a marker file so subsequent calls are no-ops.  A part that was downloaded
+and extracted by hand (no marker) is recognised from its directories and not
+downloaded again (see :func:`part_present`).  Datasets call it when constructed
+with ``download=True``; it can also be used directly or via the
+``carlanomaly-download`` command.
 
 Only the Python standard library is required.  ``tqdm`` is used for progress bars
 if importable, otherwise a plain textual fallback is printed.
@@ -24,7 +26,7 @@ import logging
 import os
 import tarfile
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -37,40 +39,46 @@ log = logging.getLogger(__name__)
 #: Base URL the archives are served from.  Override with the
 #: ``CARLANOMALY_BASE_URL`` environment variable (no trailing slash).
 DATA_BASE_URL = os.environ.get(
-    "CARLANOMALY_BASE_URL", "https://data.kkirchheim.de/carlanomaly/v1"
+    "CARLANOMALY_BASE_URL", "https://data.carlanomaly.de/v1"
 ).rstrip("/")
 
-#: All downloadable parts, with a short human-readable description of the
-#: directories each one contributes to a scenario (see ``package_dataset.sh``).
+#: The parts and what each contains.
 PARTS: Dict[str, str] = {
-    "base": "Front camera + segmentation, GNSS/IMU/weather/actions/collisions, "
-            "and (test only) front anomaly masks + timestep labels.",
-    "camera-extended": "Left/right/rear RGB + segmentation, and (test only) "
-                       "their anomaly masks.",
-    "lidar": "LiDAR point clouds, and (test only) per-point anomaly labels.",
-    "depth": "Depth maps for all four cameras.",
-    "kitti": "LiDAR labels in KITTI format.",
-    "carla-recordings": "Raw CARLA simulator recordings (sim.log).",
+    "base": "Front camera, GNSS, IMU, weather, control inputs, collisions; "
+            "test: front anomaly masks and timestep labels",
+    "camera-extended": "Left, right and rear cameras; test: their anomaly masks",
+    "lidar": "LiDAR point clouds; test: their anomaly labels",
+    "depth": "Depth maps of all four cameras",
+    "kitti": "LiDAR labels in KITTI format",
 }
 
 ALL_PARTS: Tuple[str, ...] = tuple(PARTS)
 SPLITS: Tuple[str, ...] = ("train", "test")
 
-#: SHA-256 checksums keyed by ``(part, split)``.  Sourced from ``shasums.md``.
-#: Note: ``("base", "train")`` is intentionally absent: no checksum has been
-#: published for it, so that archive is downloaded but not verified.
+#: A directory each part adds to every scenario; used to recognise parts that
+#: were extracted without the downloader (and so have no marker file).
+PART_PROBES: Dict[str, str] = {
+    "base": "rgb-front",
+    "camera-extended": "rgb-left",
+    "lidar": "pointclouds",
+    "depth": "depth-front",
+    "kitti": "kitti-front",
+}
+
+#: SHA-256 checksums keyed by ``(part, split)``, from the ``SHA256SUMS.txt``
+#: published next to the archives (updated 2026-11-01, archives now ship the
+#: dataset ``LICENSE``).
 SHA256: Dict[Tuple[str, str], str] = {
-    ("base", "test"): "267e48f2249deb0269ad950aa81bca57dc02e3bbdf2d73acc172af267b18254a",
-    ("camera-extended", "test"): "6daa1afc80df1766af4265822279f8f73f9c380f89a3902f311297c5aff1f621",
-    ("camera-extended", "train"): "11f5d0ecf124cc42a143acd3757c0ece938b6c29fb77754a5143d8cc61cc9b51",
-    ("carla-recordings", "test"): "25d039cfe5cef942378132019c70b9a05f56b14a2ccf58873f0b76f5aebb0a2c",
-    ("carla-recordings", "train"): "4b5d9843a2ef811a11c4e628d805547444b68cfedabf208a66ed0dfe255a5a58",
-    ("depth", "test"): "3d596f30830d6b7b25208fc51a2f2b86df15538d53d791020db5759cc1fc48d5",
-    ("depth", "train"): "19be433364424e051f462a888c1471b7b55b5001160f3778206695973bf26906",
-    ("kitti", "test"): "3f9a16a97e81c2279cb6e1a6172b065b3009399336574596ed2ebbc863badccc",
-    ("kitti", "train"): "49838ef473164965d59f4878b056e8abe915c809f61f48aea80fbacad3a734d1",
-    ("lidar", "test"): "fd7ebe33e824ab20005f8ee4ce7773cd1cc3c66d32e965fe4e91fb2b13b6386c",
-    ("lidar", "train"): "0d6b8f27deaca746a48da5c92d8c3b06a4d4f032a7a3245cdba2db77e2f8d998",
+    ("base", "test"): "943601ee9b00470fe7aa002063208bb2c066bdad3f647a6f2c1ce8ed6b1925e3",
+    ("base", "train"): "7ede2b700dc6340d4c5b2b1dbc746cb9d8ad09a68a6f12a91c8dc1170b4fe844",
+    ("camera-extended", "test"): "5f65d34e6b814b76e3501a4fac5eea887687168da7daf063411077dd2bd97f82",
+    ("camera-extended", "train"): "930f0b698944d03dd540cac0413dc978d93d1c581b20491ec944e171f9de69f3",
+    ("depth", "test"): "d527b6f8299d2931da2e48861e7456459b575b9f27f07e030a37d0e5f681cc88",
+    ("depth", "train"): "f36ee07c65021563e6078ef1729f34d9c840fac6aa91dbac530fe8493dcdcc48",
+    ("kitti", "test"): "ee34446704c26a70b0876f74dd61f6bb1fdb6f6e603902ea8a2d07e053f0c967",
+    ("kitti", "train"): "7806387792524969c466e7c5bb19c70daa3b4833d986c8d104a344eee8c46d90",
+    ("lidar", "test"): "c9af4f61abca1b146fbbe280aaab9f7a6383426476eab6e6b94257678fd7a0e4",
+    ("lidar", "train"): "f9d159632da18c3fa615fdb8fe1dfab30805aae20f0feb33131f44ae5ac7c677",
 }
 
 #: Where archives + extraction markers live, relative to the dataset root.
@@ -102,7 +110,6 @@ _MODALITY_PART: Dict[str, str] = {
     "anomaly_sensor": "base",
     "anomaly_scenario": "base",
     "kitti": "kitti",
-    "carla_recordings": "carla-recordings",
 }
 
 # Camera modalities whose "front" direction is in `base` but whose other
@@ -111,12 +118,16 @@ _CAMERA_MODALITIES = {"rgb", "segmentation", "anomaly_seg", "anomaly_sensor"}
 
 
 def part_for(modality: str, direction: Optional[str] = None) -> str:
-    """Return the archive part that contains a given modality/direction.
+    """Return the part that holds a modality.
 
-    Depth maps are bundled together regardless of camera direction; the RGB,
-    segmentation and anomaly-label modalities split by direction: ``front`` is
-    in ``base``, the other camera directions are in ``camera-extended``, and
-    sensor labels for ``lidar`` live in the ``lidar`` part.
+    Parameters
+    ----------
+    modality:
+        A dataset's ``modality``, e.g. ``"rgb"``, ``"depth"`` or
+        ``"pointcloud"``.
+    direction:
+        The camera, for camera data: the front camera is in ``base``, the
+        others in ``camera-extended``.
     """
     if modality not in _MODALITY_PART:
         raise ValueError(
@@ -156,6 +167,45 @@ def _download_dir(root: Path) -> Path:
 
 def _marker_path(root: Path, part: str, split: str) -> Path:
     return _download_dir(root) / f"{part}-{split}.done"
+
+
+def _scenario_dirs(root: Path, split: str) -> List[Path]:
+    """Scenario directories of one archive split (``train`` or ``test``)."""
+    if split == "train":
+        return sorted(root.glob("train/*/scenario-*"))
+    return sorted(root.glob("test/normal/*/scenario-*")) + sorted(root.glob("test/anomaly/*/*/scenario-*"))
+
+
+def part_present(root: Union[str, Path], part: str, split: str) -> bool:
+    """Whether a part's ``"train"`` or ``"test"`` archive is extracted in ``root``.
+
+    Recognises parts downloaded by :func:`~carlanomaly.ensure_parts` and parts extracted by
+    hand.
+    """
+    root = Path(root)
+    if _marker_path(root, part, split).exists():
+        return True
+    scenarios = _scenario_dirs(root, split)
+    return bool(scenarios) and all((sc / PART_PROBES[part]).is_dir() for sc in scenarios)
+
+
+def require_parts(root: Union[str, Path], parts: Sequence[str], splits: Sequence[str]) -> None:
+    """Raise :class:`FileNotFoundError` if any of ``parts`` is missing from ``root``.
+
+    The message names the missing parts and how to download them.
+    """
+    missing = [(p, sp) for p in parts for sp in splits if not part_present(root, p, sp)]
+    if not missing:
+        return
+    names = sorted({p for p, _ in missing}, key=list(ALL_PARTS).index)
+    split_names = sorted({sp for _, sp in missing}, key=list(SPLITS).index)
+    listed = ", ".join(f"{p} ({sp})" for p, sp in missing)
+    raise FileNotFoundError(
+        f"CarlAnomaly data missing under {root}: {listed}.\n"
+        f"Download it by passing download=True, or run:\n"
+        f"  carlanomaly-download --root {root} --parts {' '.join(names)} --splits {' '.join(split_names)}\n"
+        f"or fetch the archives listed at https://carlanomaly.de/download/ and extract them into {root}."
+    )
 
 
 # --------------------------------------------------------------------------
@@ -271,22 +321,39 @@ class _FallbackBar:
             print(f"  {self._desc}: done ({_fmt_bytes(self._n)})", flush=True)
 
 
+#: Files that every archive carries at the dataset root (the dataset licence).
+#: Only the first copy is extracted: later parts skip them, so an existing copy
+#: that cannot be overwritten (e.g. one created by another user in a shared
+#: dataset directory) does not stop a part from extracting.
+SHARED_ROOT_FILES = ("LICENSE",)
+
+
 def _safe_extract(tar_path: Path, dest: Path) -> None:
     """Extract ``tar_path`` into ``dest``, guarding against path traversal."""
     dest = dest.resolve()
+
+    def already_there(member: tarfile.TarInfo) -> bool:
+        # lexists: a dangling symlink counts as present and is left alone
+        return member.name in SHARED_ROOT_FILES and os.path.lexists(dest / member.name)
+
     with tarfile.open(tar_path, "r:gz") as tar:
         if hasattr(tarfile, "data_filter"):
-            # Python >= 3.12: vetted extraction filter.
-            tar.extractall(dest, filter="data")
+            # Python >= 3.12 (and security releases of older versions): vetted
+            # extraction filter; returning None skips the member.
+            def data_filter(member: tarfile.TarInfo, path: str) -> Optional[tarfile.TarInfo]:
+                return None if already_there(member) else tarfile.data_filter(member, path)
+
+            tar.extractall(dest, filter=data_filter)
         else:
             prefix = str(dest) + os.sep
-            for member in tar.getmembers():
+            members = [m for m in tar.getmembers() if not already_there(m)]
+            for member in members:
                 target = (dest / member.name).resolve()
                 if target != dest and not str(target).startswith(prefix):
                     raise RuntimeError(
                         f"refusing to extract {member.name!r}: escapes {dest}"
                     )
-            tar.extractall(dest)
+            tar.extractall(dest, members=members)
 
 
 def _ensure_one(
@@ -302,6 +369,15 @@ def _ensure_one(
     marker = _marker_path(root, part, split)
     if marker.exists():
         log.info("%s-%s already present (marker exists); skipping", part, split)
+        return
+    if part_present(root, part, split):
+        # extracted by hand: record it so later calls skip the directory scan
+        log.info("%s-%s found on disk without a marker; skipping download", part, split)
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"part={part}\nsplit={split}\nsource=found on disk\n")
+        except OSError:  # read-only dataset copy: fine, the scan just repeats next time
+            pass
         return
 
     ddir = _download_dir(root)
@@ -352,25 +428,26 @@ def ensure_parts(
     keep_archive: bool = False,
     base_url: Optional[str] = None,
 ) -> None:
-    """Download and extract dataset parts into ``root`` (idempotent).
+    """Download and extract dataset parts into ``root``, skipping those present.
+
+    Interrupted downloads resume.
 
     Parameters
     ----------
     root:
-        Dataset root (archives extract to ``root/{train,test}/...``).
+        The dataset directory.
     parts:
-        One part name or a sequence of them (see :data:`PARTS`).
+        One or more part names (see :data:`PARTS`).
     splits:
-        ``'train'``, ``'test'``, or both.  Defaults to both.
+        ``"train"``, ``"test"`` or both (default).
     verify:
-        Verify the SHA-256 checksum after download.  When no checksum is
-        published for an archive, a warning is logged and the file is kept.
+        Check each archive's SHA-256 checksum.
     progress:
-        Show a download progress bar (tqdm if available, else textual).
+        Show a progress bar.
     keep_archive:
-        Keep the downloaded ``.tar.gz`` after extraction (default: delete it).
+        Keep the ``.tar.gz`` files after extracting them.
     base_url:
-        Override :data:`DATA_BASE_URL` for this call.
+        Download from this URL instead of the default.
     """
     root = Path(root)
     part_list = [parts] if isinstance(parts, str) else list(parts)

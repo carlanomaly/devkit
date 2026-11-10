@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..index import ScenarioIndex
-from ._base import PathLike, ensure_parts_for, required_parts, resolve_index
+from ._base import PathLike, check_parts_for, ensure_parts_for, required_parts, resolve_index
 from .anomaly_seg import AnomalySegmentationDataset
 from .depth import DepthDataset
 from .rgb import RGBDataset
@@ -17,32 +17,22 @@ _CAMERA_MODALITIES = ("rgb", "depth", "segmentation", "anomaly_seg")
 
 
 class CameraDataset(Dataset):
-    """Composite dataset for a single camera direction.
+    """Everything one camera records, with its anomaly mask and identifiers.
 
-    Wraps :class:`RGBDataset`, :class:`DepthDataset`,
-    :class:`SegmentationDataset`, and :class:`AnomalySegmentationDataset`.
+    Each item is a dict with the keys
 
-    Returns a dict with keys ``'rgb'``, ``'depth'``, ``'segmentation'``
-    (sub-dict with ``'semantic'`` and ``'instance'``), and ``'anomaly_mask'``,
-    plus the evaluator identifiers ``'scenario_id'`` and ``'timesteps'``.
+    - ``"rgb"``, ``"depth"``, ``"segmentation"``, ``"anomaly_mask"``: the items
+      of :class:`RGBDataset`, :class:`DepthDataset`,
+      :class:`SegmentationDataset` and :class:`AnomalySegmentationDataset`;
+    - ``"scenario_id"``, ``"timesteps"``: the identifiers the evaluators need.
 
-    Parameters
-    ----------
-    root:
-        Path to the CarlAnomaly dataset directory.
-    split:
-        ``'train'``, ``'test_normal'``, ``'test_anomaly'``, or ``'test'``.
-    direction:
-        Camera direction (``'front'``, ``'left'``, ``'right'``, ``'rear'``).
-    transform:
-        Optional transform applied to the merged output dict.
-    download:
-        If ``True``, fetch the archive parts this composite needs (``base`` +
-        ``depth``, plus ``camera-extended`` for non-front directions) into
-        ``root`` before loading.
+    Needs the ``depth`` part in addition to the camera's own.
 
-    Additional keyword arguments (``clip_len``, ``stride``, ``parts``, ...)
-    are forwarded to :class:`~carlanomaly.index.ScenarioIndex`.
+    Example
+    -------
+    >>> cam = CameraDataset("/data/carlanomaly", split="test", direction="front")
+    >>> sorted(cam[0])
+    ['anomaly_mask', 'depth', 'rgb', 'scenario_id', 'segmentation', 'timesteps']
     """
 
     def __init__(
@@ -53,15 +43,17 @@ class CameraDataset(Dataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
+        parts = index_kwargs.pop("parts", None) or required_parts(
+            (m, direction) for m in _CAMERA_MODALITIES
+        )
         if download:
-            parts = index_kwargs.pop("parts", None) or required_parts(
-                (m, direction) for m in _CAMERA_MODALITIES
-            )
             ensure_parts_for(root, split, index, parts,
                              verify=index_kwargs.get("download_verify", True))
+        elif index is None:
+            check_parts_for(root, split, parts)
         index = resolve_index(root, split, index=index, download=False, **index_kwargs)
         self._index = index
         self.direction = direction

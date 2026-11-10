@@ -1,6 +1,7 @@
 """Tests for :class:`WithIdentifiers` and the label datasets that need no files.
 
-No disk access: scenario discovery is stubbed with in-memory records.
+No disk access: scenario discovery is stubbed with in-memory records, and the
+check that the archive parts are on disk is switched off.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import pytest
 import torch
 from torch.utils.data import Dataset
 
+import carlanomaly.download as dl
 from carlanomaly.datasets import AnomalyScenarioDataset, AnomalySensorDataset, WithIdentifiers
 from carlanomaly.index import ScenarioIndex, ScenarioRecord
 
@@ -26,6 +28,7 @@ def stub_discovery(monkeypatch):
                        anomaly_type="vanish-actor"),
     ]
     monkeypatch.setattr(ScenarioIndex, "_discover", lambda self: list(records))
+    monkeypatch.setattr(dl, "require_parts", lambda *a, **kw: None)  # nothing on disk
     return records
 
 
@@ -95,6 +98,37 @@ def test_anomaly_sensor_train_is_all_false(monkeypatch):
                                      n_timesteps=2, split="train", town="Town01",
                                      anomaly_type=None)],
     )
+    monkeypatch.setattr(dl, "require_parts", lambda *a, **kw: None)  # nothing on disk
     ds = AnomalySensorDataset(root="/x", split="train", sensor="lidar",
                               download=False, clip_len=2)
     assert torch.equal(ds[0], torch.zeros(2, dtype=torch.bool))
+
+
+# ---------------------------------------------------------------------------
+# SegmentationDataset
+# ---------------------------------------------------------------------------
+
+
+def test_segmentation_instance_id_byte_order(tmp_path, monkeypatch):
+    """Instance id = B * 256 + G, the encoding that matches the LiDAR object_id."""
+    import numpy as np
+    from PIL import Image
+
+    from carlanomaly.datasets import SegmentationDataset
+
+    scenario = tmp_path / "test" / "anomaly" / "Town01" / "spawn-props" / "scenario-1"
+    (scenario / "segmentation-front").mkdir(parents=True)
+    rgba = np.zeros((2, 3, 4), dtype=np.uint8)
+    rgba[..., 3] = 255
+    rgba[0, 0] = (21, 0x8C, 0x49, 255)  # class 21, actor id 18828 = 0x498C
+    Image.fromarray(rgba, "RGBA").save(scenario / "segmentation-front" / "000000.png")
+
+    record = ScenarioRecord(path=scenario, n_timesteps=1, split="test_anomaly",
+                            town="Town01", anomaly_type="spawn-props")
+    monkeypatch.setattr(ScenarioIndex, "_discover", lambda self: [record])
+    monkeypatch.setattr(dl, "require_parts", lambda *a, **kw: None)
+
+    item = SegmentationDataset(root=tmp_path, split="test")[0]
+    assert item["semantic"][0, 0, 0] == 21
+    assert item["instance"][0, 0, 0] == 18828
+    assert item["instance"][0, 1, 1] == 0

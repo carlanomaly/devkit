@@ -8,11 +8,11 @@ from ._base import AtomicDataset
 
 
 class AnomalyTimestepDataset(AtomicDataset):
-    """Timestep-level anomaly labels (one label per timestep).
+    """Whether the scene is anomalous, per timestep.
 
-    Returns a ``BoolTensor (T,)``.  Labels are stored on disk as
-    ``anomaly-observation.feather``.  For the train split (where no label
-    file exists), returns all-False.
+    Each item is a ``BoolTensor (T,)``, ``True`` while the anomaly is going on,
+    whether or not a sensor shows it. All ``False`` in the train split. These
+    are the labels :class:`~carlanomaly.TimestepEvaluator` uses.
     """
 
     modality = "anomaly_timestep"

@@ -6,34 +6,21 @@ import torch
 from torch.utils.data import Dataset
 
 from ..index import ScenarioIndex
-from ._base import PathLike, ensure_parts_for, required_parts, resolve_index
+from ._base import PathLike, check_parts_for, ensure_parts_for, required_parts, resolve_index
 from .anomaly_lidar import AnomalyLiDARDataset
 from .pointcloud import PointCloudDataset
 
 
 class LiDARDataset(Dataset):
-    """Composite dataset for LiDAR point clouds with anomaly labels.
+    """LiDAR point clouds with their anomaly labels and identifiers.
 
-    Wraps :class:`PointCloudDataset` and :class:`AnomalyLiDARDataset`.
+    Each item is a dict with the keys
 
-    Returns a dict with keys ``'points'`` (``List[DataFrame]``) and
-    ``'anomaly_lidar'`` (``List[BoolTensor]``), plus the evaluator
-    identifiers ``'scenario_id'`` and ``'timesteps'``.
+    - ``"points"``: the item of :class:`PointCloudDataset`;
+    - ``"anomaly_lidar"``: the item of :class:`AnomalyLiDARDataset`;
+    - ``"scenario_id"``, ``"timesteps"``: the identifiers the evaluators need.
 
-    Parameters
-    ----------
-    root:
-        Path to the CarlAnomaly dataset directory.
-    split:
-        ``'train'``, ``'test_normal'``, ``'test_anomaly'``, or ``'test'``.
-    transform:
-        Optional transform applied to the merged output dict.
-    download:
-        If ``True``, fetch the archive parts this composite needs (``base`` +
-        ``lidar``) into ``root`` before loading.
-
-    Additional keyword arguments (``clip_len``, ``stride``, ``parts``, ...)
-    are forwarded to :class:`~carlanomaly.index.ScenarioIndex`.
+    Batch it with :func:`carlanomaly_collate_fn`.
     """
 
     def __init__(
@@ -43,15 +30,17 @@ class LiDARDataset(Dataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
+        parts = index_kwargs.pop("parts", None) or required_parts(
+            [("pointcloud", None), ("anomaly_lidar", None)]
+        )
         if download:
-            parts = index_kwargs.pop("parts", None) or required_parts(
-                [("pointcloud", None), ("anomaly_lidar", None)]
-            )
             ensure_parts_for(root, split, index, parts,
                              verify=index_kwargs.get("download_verify", True))
+        elif index is None:
+            check_parts_for(root, split, parts)
         index = resolve_index(root, split, index=index, download=False, **index_kwargs)
         self._index = index
         self.transform = transform

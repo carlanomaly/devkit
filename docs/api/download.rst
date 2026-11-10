@@ -1,26 +1,35 @@
-Download utilities
-==================
+Download
+========
 
 .. currentmodule:: carlanomaly
 
-.. autodata:: carlanomaly.download.PARTS
+Datasets call these functions when you pass ``download=True``; use them
+directly to download from your own code. :doc:`/install` lists the parts and
+their sizes.
 
 .. autofunction:: ensure_parts
 
 .. autofunction:: part_for
 
-CLI
----
+.. autofunction:: carlanomaly.download.part_present
 
-The ``carlanomaly-download`` command-line tool wraps :func:`ensure_parts`:
+.. autofunction:: carlanomaly.download.require_parts
 
-.. code-block:: bash
+.. data:: PARTS
 
-   # List available parts
+   The part names, mapped to a description of their contents. See
+   :doc:`/install`.
+
+Command line
+------------
+
+``carlanomaly-download`` calls :func:`ensure_parts`:
+
+.. code-block:: text
+
+   carlanomaly-download --root DIR [--parts PART ...] [--splits {train,test} ...]
+                        [--no-verify] [--keep-archive] [--base-url URL]
    carlanomaly-download --list
 
-   # Download the base part (front camera + tabular + test labels)
-   carlanomaly-download --root /data/carlanomaly --parts base
-
-   # Download LiDAR data for the test split only
-   carlanomaly-download --root /data/carlanomaly --parts lidar --splits test
+``--parts`` defaults to ``base``, ``--splits`` to both. ``--list`` prints the
+parts and their contents.

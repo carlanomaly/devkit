@@ -11,16 +11,13 @@ from ._base import AtomicDataset, PathLike
 
 
 class AnomalySegmentationDataset(AtomicDataset):
-    """Per-timestep pixel-level anomaly masks from a single camera.
+    """Anomaly masks for one camera: which pixels show the anomaly.
 
-    Returns a ``BoolTensor (T, H, W)``.  For the train split (where no
-    anomaly masks exist), returns all-False tensors.
+    Each item is a ``BoolTensor (T, 1080, 1920)``, ``True`` on the pixels of the
+    anomalous object. Timesteps without a visible anomaly, normal scenarios, the
+    train split, and anomaly types without masks give all-``False`` masks.
 
-    The required archive parts are fetched into ``root`` automatically (``front``
-    lives in ``base``; other directions add ``camera-extended``); pass
-    ``download=False`` to skip.  Remaining keyword arguments (``clip_len``,
-    ``stride``, ``parts``, ...) are forwarded to
-    :class:`~carlanomaly.index.ScenarioIndex`.
+    These are the labels :class:`~carlanomaly.PixelEvaluator` uses.
     """
 
     modality = "anomaly_seg"
@@ -37,7 +34,7 @@ class AnomalySegmentationDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(

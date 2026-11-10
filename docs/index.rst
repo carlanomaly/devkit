@@ -1,99 +1,86 @@
 CarlAnomaly DevKit
 ==================
 
-Data-loading and evaluation framework for the
-`CarlAnomaly <https://carlanomaly.github.io>`_ benchmark: multimodal anomaly
-detection for autonomous driving built on CARLA simulator data.
+`CarlAnomaly <https://carlanomaly.de>`_ is a benchmark for anomaly detection
+in autonomous driving. It consists of 30-second driving scenarios recorded in
+the CARLA simulator with four cameras, a LiDAR and vehicle sensors. The
+training split contains only normal driving; the test split adds scenarios
+with nine kinds of anomalies, from debris on the road to traffic lights that
+blink yellow or a car that vanishes. A detector is trained on normal data and
+has to tell where, when and whether something anomalous happens.
+
+This package, ``carlanomaly``, does the bookkeeping around that:
+
+- **Loading**: every sensor and every label is a PyTorch ``Dataset``, so the
+  data plugs into a ``DataLoader`` and your training code.
+- **Evaluation**: one evaluator per benchmark level computes AUROC, AUPR and
+  FPR95 from your detector's scores. It loads the ground truth itself, so you
+  never handle the labels.
+- **Download**: the dataset is several hundred gigabytes, split into parts.
+  The package fetches the parts you need, and only when you ask it to.
 
 .. code-block:: bash
 
    pip install git+https://github.com/carlanomaly/devkit
 
-Requires Python ≥ 3.10 and PyTorch.
+Example
+-------
 
-Quick start
------------
-
-Every dataset takes the dataset ``root`` and a ``split``, downloads the
-archive parts it needs on first use, and serves clips as tensors:
+This scores every pixel of the front camera on the test split and reports how
+well the scores separate anomalous from normal pixels:
 
 .. code-block:: python
 
-   from carlanomaly.datasets import RGBDataset
-
-   rgb = RGBDataset(root="/data/carlanomaly", split="test", direction="front")
-   clip = rgb[0]  # FloatTensor (T, 3, H, W) in [0, 1]
-
-Datasets built from the same ``root``/``split`` (and ``clip_len``/``stride``)
-align index-for-index: ``rgb[i]`` and ``lidar[i]`` refer to the same scenario
-and timestep window.
-
-To score a model against the benchmark, feed its anomaly scores to a
-streaming evaluator — ground-truth labels are loaded automatically.  The
-:class:`~carlanomaly.datasets.WithIdentifiers` wrapper attaches the scenario
-and timestep identifiers the evaluators expect:
-
-.. code-block:: python
-
+   import torch
    from torch.utils.data import DataLoader
    from carlanomaly import PixelEvaluator
    from carlanomaly.datasets import RGBDataset, WithIdentifiers
 
-   rgb = WithIdentifiers(RGBDataset(root="/data/carlanomaly", split="test"))
-   loader = DataLoader(rgb, batch_size=8)
-
+   # The front camera's test images, each with the scenario and timestep it
+   # belongs to. Fetches the base part (86 GB) on first use.
+   test = WithIdentifiers(RGBDataset("/data/carlanomaly", split="test", download=True))
    evaluator = PixelEvaluator(sensor="front")
-   for batch in loader:
-       scores = model(batch["data"][:, 0])  # (B, H, W) per-pixel anomaly scores
-       evaluator.update(scores, batch["scenario_id"], batch["timesteps"][:, 0])
 
-   print(evaluator.compute())  # pooled AUROC / AUPR / FPR95 + breakdowns
+   with torch.no_grad():
+       for batch in DataLoader(test, batch_size=8, num_workers=8):
+           images = batch["data"][:, 0]          # (B, 3, 1080, 1920)
+           scores = model(images)                # (B, 1080, 1920), higher = more anomalous
+           evaluator.update(scores, batch["scenario_id"], batch["timesteps"][:, 0])
 
-Evaluation is per-timestep: with the default ``clip_len=1`` each item is a
-single timestep, and ``[:, 0]`` selects it from the clip dimension ``T`` that
-every dataset returns.  See :doc:`evaluation` for the full protocol and a
-runnable example for every level.
+   results = evaluator.compute()
+   print(results["auroc"], results["fpr95"])
 
-Evaluation levels
------------------
+``model`` stands for your detector. The ``[:, 0]`` drops the time dimension
+that every dataset returns; :doc:`loading-data` explains why it is there.
 
-Models are evaluated at four levels, matching the paper:
-
-- **Sample** — per-pixel / per-point anomaly localisation
-  (:class:`~carlanomaly.PixelEvaluator`, :class:`~carlanomaly.PointEvaluator`).
-- **Sensor** — one score per sensor reading
-  (:class:`~carlanomaly.SensorEvaluator`).
-- **Timestep** — one score per timestep, all sensors treated as one multimodal
-  observation (:class:`~carlanomaly.TimestepEvaluator`).
-- **Scenario** — one score per driving scenario
-  (:class:`~carlanomaly.ScenarioEvaluator`).
-
-Package overview
+Where to go next
 ----------------
 
-- **Datasets** (:mod:`carlanomaly.datasets`) — one class per modality (RGB,
-  segmentation, depth, point clouds, anomaly labels, IMU/GNSS/weather/…), plus
-  composite datasets (:class:`~carlanomaly.datasets.CameraDataset`,
-  :class:`~carlanomaly.datasets.LiDARDataset`, and
-  :class:`~carlanomaly.datasets.CarlAnomalyDataset` for everything).
-- **Evaluators** (:mod:`carlanomaly.evaluator`) — streaming metric
-  accumulators for the four levels above; ground-truth labels are loaded
-  automatically.
-- **Download** (:mod:`carlanomaly.download`) — the dataset ships as modular
-  archive parts; datasets fetch what they need with ``download=True``, or use
-  the ``carlanomaly-download`` CLI.
+- :doc:`install`: install the package and get the parts of the dataset you
+  need.
+- :doc:`dataset`: what is in a scenario, the anomaly types, and how they are
+  labelled.
+- :doc:`loading-data`: splits, clips, and the dataset classes for each sensor.
+- :doc:`evaluation`: evaluate a detector at the four benchmark levels.
+- :doc:`metrics`: what the reported numbers mean and how to compare them.
+- The `baselines <https://github.com/carlanomaly/baselines>`_ repository has
+  complete training and evaluation scripts for the detectors in the paper.
 
 .. toctree::
-   :maxdepth: 2
+   :hidden:
    :caption: Guide
 
+   install
+   dataset
+   loading-data
    evaluation
+   metrics
 
 .. toctree::
-   :maxdepth: 2
-   :caption: API Reference
+   :hidden:
+   :caption: API reference
 
    api/datasets
-   api/evaluator
+   api/evaluators
    api/download
-   api/advanced
+   api/scenario-index

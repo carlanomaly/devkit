@@ -73,6 +73,20 @@ def ensure_parts_for(
     ensure_parts(eff_root, list(parts), splits_for(eff_split), verify=verify)
 
 
+def check_parts_for(root: Optional[PathLike], split: str, parts: Iterable[str]) -> None:
+    """Raise :class:`FileNotFoundError` if ``parts`` are not in ``root`` yet.
+
+    Called instead of :func:`ensure_parts_for` when ``download=False``, so a
+    missing part fails at construction with instructions instead of later with
+    a bare file-not-found error from deep inside ``__getitem__``.
+    """
+    from ..download import require_parts, splits_for
+
+    if root is None:
+        raise ValueError("either `root` or `index` must be provided")
+    require_parts(root, list(parts), splits_for(split))
+
+
 class _CachedFeatherMixin:
     """Shared caching for per-scenario feather files."""
 
@@ -106,16 +120,21 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
     Subclasses point the loader at a dataset ``root`` directory and a
     ``split``; the underlying scenario index is built internally.
 
-    Downloading is on by default: simply constructing a dataset fetches the
-    archive parts its modality needs into ``root`` (idempotent: already-present
-    parts are skipped).  The parts are selected automatically from the
-    subclass's :attr:`modality` (and ``direction`` where applicable), so e.g. a
-    LiDAR dataset pulls the ``lidar`` part and a left-camera dataset pulls
-    ``camera-extended``.  This holds whether the dataset builds its own index or
-    shares one: a dataset attached to a shared index still pulls its
-    modality-specific part (the index's discovery only needs ``base``).  Pass
-    ``download=False`` to assume the data is already present, or an explicit
-    ``parts`` to override the auto-selection.
+    With ``download=True``, constructing a dataset fetches the archive parts its
+    modality needs into ``root`` (idempotent: parts already present, whether
+    downloaded by the devkit or extracted by hand, are skipped).  The parts are
+    selected automatically from the subclass's :attr:`modality` (and
+    ``direction`` where applicable), so e.g. a LiDAR dataset pulls the ``lidar``
+    part and a left-camera dataset pulls ``camera-extended``.  This holds
+    whether the dataset builds its own index or shares one: a dataset attached
+    to a shared index still pulls its modality-specific part (the index's
+    discovery only needs ``base``).  Pass an explicit ``parts`` to override the
+    auto-selection.
+
+    Downloading is off by default, since a single part is up to several hundred
+    GB.  A dataset that builds its own index then checks that its parts are
+    present and raises :class:`FileNotFoundError` naming the missing parts and
+    how to fetch them.
     """
 
     #: Dataset-registry modality key (see ``carlanomaly.download``).  Drives the
@@ -131,7 +150,7 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
         stride: Optional[int] = None,
         anomaly_types: Optional[Sequence[str]] = None,
         towns: Optional[Sequence[str]] = None,
-        download: bool = True,
+        download: bool = False,
         parts: Optional[Sequence[str]] = None,
         download_verify: bool = True,
         direction: Optional[str] = None,
@@ -139,11 +158,14 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
         index: Optional[ScenarioIndex] = None,
     ) -> None:
         self.direction = direction
+        if parts is None:
+            parts = (required_parts([(self.modality, direction)])
+                     if self.modality is not None else ["base"])
         if download:
-            if parts is None:
-                parts = (required_parts([(self.modality, direction)])
-                         if self.modality is not None else ["base"])
             ensure_parts_for(root, split, index, parts, verify=download_verify)
+        elif index is None:
+            # datasets sharing an index belong to a composite, which checked already
+            check_parts_for(root, split, parts)
         # Parts are fetched above; the index only discovers (never downloads).
         self._index = resolve_index(
             root,
@@ -177,24 +199,24 @@ class AtomicDataset(Dataset, _CachedFeatherMixin):
 
 
 class WithIdentifiers(Dataset):
-    """Attach evaluator identifiers to any CarlAnomaly dataset's items.
+    """Add the scenario and timesteps to every item of a dataset.
 
-    Wraps a dataset and returns
-    ``{"data": <wrapped item>, "scenario_id": str, "timesteps": LongTensor (T,)}``,
-    so that a ``DataLoader`` batch carries everything the evaluators need
-    (see the evaluation guide).  Works with every atomic and composite
-    CarlAnomaly dataset::
+    The evaluators need to know which scenario and timestep each score belongs
+    to. Single-sensor datasets return bare tensors; wrap them in this class to
+    get dict items with the keys
 
-        rgb = WithIdentifiers(RGBDataset(root, split="test"))
-        item = rgb[0]
-        item["data"]         # what RGBDataset(...)[0] would have returned
-        item["scenario_id"]  # str, e.g. ".../test/normal/Town10HD/scenario-3"
-        item["timesteps"]    # LongTensor (T,)
+    - ``"data"``: the wrapped dataset's item;
+    - ``"scenario_id"``: the scenario's directory, as a string;
+    - ``"timesteps"``: ``LongTensor (T,)``, the timesteps of the item.
 
-    When the wrapped dataset returns non-tensor values (point clouds,
-    collision DataFrames), use
-    :func:`~carlanomaly.datasets.carlanomaly_collate_fn` as the DataLoader
-    ``collate_fn``.
+    Example
+    -------
+    >>> test = WithIdentifiers(RGBDataset("/data/carlanomaly", split="test"))
+    >>> item = test[0]
+    >>> item["data"].shape, item["scenario_id"], item["timesteps"]
+    (torch.Size([1, 3, 1080, 1920]), '/data/carlanomaly/test/normal/Town01/scenario-1', tensor([0]))
+
+    For point clouds or collisions, batch it with :func:`carlanomaly_collate_fn`.
     """
 
     def __init__(self, dataset: Dataset) -> None:

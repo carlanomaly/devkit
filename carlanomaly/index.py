@@ -24,6 +24,13 @@ ANOMALY_TYPES = (
 
 @dataclass(frozen=True)
 class ScenarioRecord:
+    """One scenario of the dataset.
+
+    ``path`` is its directory, ``n_timesteps`` its length and ``split`` one
+    of ``"train"``, ``"test_normal"`` and ``"test_anomaly"``.  ``anomaly_type``
+    is ``None`` for normal scenarios.
+    """
+
     path: Path
     n_timesteps: int
     split: str  # 'train' | 'test_normal' | 'test_anomaly'
@@ -32,40 +39,12 @@ class ScenarioRecord:
 
 
 class ScenarioIndex:
-    """Discovers scenarios and builds a flat sliding-window index.
+    """The scenarios of a split and the clips cut from them.
 
-    Datasets construct this internally from the ``root``/``split`` you pass
-    them, so you normally never instantiate it directly.  Datasets built with
-    the same parameters produce identical indices, so ``dataset_a[i]`` and
-    ``dataset_b[i]`` always refer to the same scenario and timestep window.
-
-    Parameters
-    ----------
-    root:
-        Path to the CarlAnomaly root directory (contains ``train/`` and
-        ``test/``).
-    split:
-        ``'train'``, ``'test_normal'``, ``'test_anomaly'``, or ``'test'``
-        (= normal + anomaly combined).
-    clip_len:
-        Number of consecutive timesteps per item.
-    stride:
-        Sliding-window stride.  Defaults to ``clip_len``.
-    anomaly_types:
-        Restrict test anomaly clips to a subset of types.
-    towns:
-        Restrict to scenarios from specific towns.
-    download:
-        If ``True``, download and extract the required dataset archives into
-        ``root`` (via :func:`carlanomaly.download.ensure_parts`) before
-        discovery.  Idempotent: already-present archives are skipped.
-    parts:
-        Which dataset parts to download when ``download=True``.  Defaults to
-        ``["base"]`` (the minimum needed for scenario discovery).  Add more
-        (e.g. ``"lidar"``, ``"depth"``, ``"camera-extended"``) for the
-        modalities you intend to load.
-    download_verify:
-        Verify SHA-256 checksums of downloaded archives (default ``True``).
+    Item ``i`` of every dataset built on the same index is the same clip.
+    The arguments are the :ref:`common dataset arguments <dataset-arguments>`;
+    with ``download=True`` the index downloads ``parts`` (default:
+    ``["base"]``).
     """
 
     def __init__(
@@ -110,18 +89,19 @@ class ScenarioIndex:
 
     @property
     def records(self) -> List[ScenarioRecord]:
+        """All scenarios of the split."""
         return self._records
 
     def __len__(self) -> int:
         return len(self._index)
 
     def __getitem__(self, idx: int) -> Tuple[ScenarioRecord, int]:
-        """Return ``(ScenarioRecord, timestep_start)`` for the given item index."""
+        """Return the scenario of item ``idx`` and the clip's first timestep."""
         rec_idx, timestep_start = self._index[idx]
         return self._records[rec_idx], timestep_start
 
     def timesteps_for(self, idx: int) -> List[int]:
-        """Return the list of timestep indices for item ``idx``."""
+        """Return the timesteps of item ``idx``."""
         _, start = self._index[idx]
         return list(range(start, start + self.clip_len))
 
@@ -138,6 +118,10 @@ class ScenarioIndex:
         if self.split in ("test_anomaly", "test"):
             records += self._scan_test_anomaly()
         if not records:
+            # usually the dataset is not there yet: name the part to fetch
+            from .download import require_parts, splits_for
+
+            require_parts(self.root, ["base"], splits_for(self.split))
             raise RuntimeError(
                 f"No scenarios found for split={self.split!r} under {self.root}"
             )

@@ -11,19 +11,18 @@ from ._base import AtomicDataset, PathLike
 
 
 class SegmentationDataset(AtomicDataset):
-    """Per-timestep instance segmentation masks from a single camera.
+    """Semantic and instance segmentation from one camera.
 
-    Returns a dict with:
-        ``'semantic'``: ``LongTensor (T, H, W)`` of CARLA class ids (1-28,
-            non-contiguous).
-        ``'instance'``: ``LongTensor (T, H, W)`` of instance ids
-            (green * 256 + blue channel of the RGBA mask).
+    Each item is a dict of two ``LongTensor (T, 1080, 1920)``:
 
-    The required archive parts are fetched into ``root`` automatically (``front``
-    lives in ``base``; other directions add ``camera-extended``); pass
-    ``download=False`` to skip.  Remaining keyword arguments (``clip_len``,
-    ``stride``, ``parts``, ...) are forwarded to
-    :class:`~carlanomaly.index.ScenarioIndex`.
+    - ``"semantic"``: the CARLA class of each pixel, e.g. 1 road, 7 traffic
+      light, 14 car (`class table <https://carlanomaly.de/format/#segmentation>`_).
+    - ``"instance"``: the object each pixel belongs to. The ids match the
+      ``object_id`` of the LiDAR points (:class:`PointCloudDataset`).
+
+    The segmentation is rendered by the simulator, so it is exact. Use it to
+    train a segmentation model on the train split, a common basis for
+    anomaly detectors.
     """
 
     modality = "segmentation"
@@ -36,7 +35,7 @@ class SegmentationDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(
@@ -54,7 +53,8 @@ class SegmentationDataset(AtomicDataset):
             r = arr[:, :, 0].astype(np.int64)
             r[r > 28] = 0  # rendering artifacts at object boundaries
             semantic_list.append(torch.from_numpy(r))
-            inst = arr[:, :, 1].astype(np.int64) * 256 + arr[:, :, 2].astype(np.int64)
+            # B is the high byte, G the low byte
+            inst = arr[:, :, 2].astype(np.int64) * 256 + arr[:, :, 1].astype(np.int64)
             instance_list.append(torch.from_numpy(inst))
         item = {
             "semantic": torch.stack(semantic_list),   # (T, H, W)

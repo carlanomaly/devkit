@@ -1,86 +1,111 @@
-Evaluating your model
+Evaluating a detector
 =====================
 
-CarlAnomaly evaluates anomaly detectors at four levels, from fine-grained
-localisation to whole-scenario detection:
+Your detector produces anomaly **scores**: numbers where higher means more
+anomalous. An evaluator collects them over the test split, compares them with
+the ground truth, and reports how well they separate anomalous from normal
+data. It loads the ground truth from the dataset itself, so your evaluation
+code only handles scores.
+
+There is one evaluator per :ref:`evaluation level <evaluation-levels>`:
 
 .. list-table::
    :header-rows: 1
-   :widths: 14 30 34 22
+   :widths: 14 32 54
 
    * - Level
-     - One score per …
-     - Question answered
+     - Your detector gives one score per
      - Evaluator
    * - Sample
-     - pixel / LiDAR point
-     - *Where* in the sensor data is the anomaly?
+     - pixel of a camera image, or LiDAR point
      - :class:`~carlanomaly.PixelEvaluator`, :class:`~carlanomaly.PointEvaluator`
    * - Sensor
-     - sensor reading (one sensor, one timestep)
-     - Does this sensor see an anomaly?
+     - sensor reading (one camera image or point cloud)
      - :class:`~carlanomaly.SensorEvaluator`
    * - Timestep
-     - timestep (all sensors jointly)
-     - Is the scene anomalous right now?
+     - timestep, using any or all sensors
      - :class:`~carlanomaly.TimestepEvaluator`
    * - Scenario
      - scenario
-     - Did anything anomalous happen in this recording?
      - :class:`~carlanomaly.ScenarioEvaluator`
 
-Your model only produces anomaly **scores** (higher = more anomalous); every
-evaluator loads its own ground-truth labels from disk.  All evaluators are
-streaming accumulators, so the test split never has to fit in memory::
+You can evaluate at one level or at all of them. A detector that scores pixels
+can report every level, by reducing its pixel scores step by step, as in the
+:ref:`complete example <all-levels>` below.
 
-   evaluator = ...
+How evaluators work
+-------------------
+
+Every evaluator is used the same way:
+
+.. code-block:: python
+
+   evaluator = SomeEvaluator(...)
    for batch in loader:
-       scores = model(batch)
+       scores = ...                       # your detector
        evaluator.update(scores, scenario_ids, timestep_ids)
-   results = evaluator.compute()
+   results = evaluator.compute()          # dict of metrics, see Metrics
 
-Clips, timesteps, and identifiers
----------------------------------
+``update`` keeps only what the metrics need: a histogram at the sample level,
+one number per score at the other levels. ``compute`` can be
+called at any time; ``reset`` starts over.
 
-Two conventions connect the datasets to the evaluators:
+Two rules make results comparable with the benchmark and the paper:
 
-**Evaluate one timestep at a time.**  Datasets serve *clips* of ``clip_len``
-consecutive timesteps and always return a leading time dimension ``T`` —
-that is what temporal models train on.  Evaluation, however, is
-per-timestep.  Use the defaults ``clip_len=1, stride=1`` for the test split,
-so that every timestep appears exactly once as its own item; ``T`` is then a
-singleton dimension, which is why the examples below index ``[:, 0]`` — it
-selects the clip's single timestep, it does not skip anything.  A temporal
-model that consumes longer clips should assign its score to the timestep it
-describes (e.g. a future-frame-prediction model scoring the last timestep of
-each clip would pass ``batch["timesteps"][:, -1]``).
+- **Evaluate the whole** ``test`` **split.** The metrics measure how well
+  scores separate anomalous from normal data, so they need both. Leaving out
+  normal scenarios hides false alarms; leaving out anomaly types changes the
+  mix of positives.
+- **Do not tune on the test split.** Choose thresholds, normalisation
+  statistics and hyperparameters on the training split.
 
-**Every score carries identifiers.**  Evaluators identify data by
-``scenario_id`` (the scenario directory's path, as a string) and
-``timestep_id`` (integer).  :class:`~carlanomaly.datasets.CameraDataset`,
-:class:`~carlanomaly.datasets.LiDARDataset`, and
-:class:`~carlanomaly.datasets.CarlAnomalyDataset` include them in every item
-under the ``"scenario_id"`` and ``"timesteps"`` keys.  For the single-modality
-datasets (which return bare tensors), wrap them in
-:class:`~carlanomaly.datasets.WithIdentifiers`::
+Identifiers
+-----------
+
+``update`` takes, next to the scores, the scenario and timestep each score
+belongs to. The evaluator uses them to find the matching label, and to report
+results per anomaly type.
+
+The single-sensor datasets return bare tensors, without identifiers. Wrap them
+in :class:`~carlanomaly.datasets.WithIdentifiers` to get both:
+
+.. code-block:: python
 
    from torch.utils.data import DataLoader
    from carlanomaly.datasets import RGBDataset, WithIdentifiers
 
-   rgb = WithIdentifiers(RGBDataset(root="/data/carlanomaly", split="test"))
-   rgb[0]   # {"data": FloatTensor (T, 3, H, W), "scenario_id": str,
-            #  "timesteps": LongTensor (T,)}
+   test = WithIdentifiers(RGBDataset("/data/carlanomaly", split="test"))
+   loader = DataLoader(test, batch_size=8, num_workers=8)
 
-   loader = DataLoader(rgb, batch_size=8)  # batches: data (B, T, 3, H, W),
-                                           # scenario_id list[str], timesteps (B, T)
+   batch = next(iter(loader))
+   batch["data"]         # (8, 1, 3, 1080, 1920): the RGB images
+   batch["scenario_id"]  # 8 strings: the scenario directory of each item
+   batch["timesteps"]    # (8, 1): the timesteps of each item
+
+The combined datasets (:class:`~carlanomaly.datasets.CameraDataset`,
+:class:`~carlanomaly.datasets.LiDARDataset`,
+:class:`~carlanomaly.datasets.CarlAnomalyDataset`) include ``scenario_id``
+and ``timesteps`` without the wrapper.
+
+A ``scenario_id`` is the path of the scenario's directory. Pass it on
+unchanged: the evaluators read the labels from that directory and the anomaly
+type from the path.
+
+**One score per timestep.** ``batch["timesteps"]`` has a column per timestep
+of the clip. With the default ``clip_len=1`` there is one, and
+``batch["timesteps"][:, 0]`` gives the timestep of each item, as in the
+examples below. A model that reads longer clips scores one timestep per clip,
+usually the last; pass that one, ``batch["timesteps"][:, -1]``, and use
+``stride=1`` so that every timestep gets a score. The first ``clip_len - 1``
+timesteps of each scenario then have no score and are left out.
 
 Sample level
 ------------
 
-Provide per-pixel score maps (or per-point score vectors) for each timestep.
-Pixels and points from the *entire* split — anomalous timesteps, anomaly-free
-timesteps, and normal scenarios alike — are pooled into one binary problem, so
-false positives on normal data count against you::
+At the sample level your detector marks *where* the anomaly is: a score for
+every pixel of a camera image or every LiDAR point.
+
+.. code-block:: python
 
    import torch
    from carlanomaly import PixelEvaluator
@@ -89,62 +114,119 @@ false positives on normal data count against you::
 
    with torch.no_grad():
        for batch in loader:
-           images = batch["data"][:, 0].to(device)   # (B, 3, H, W)
-           scores = model(images)                    # (B, H, W) pixel scores
-           pixel_eval.update(scores, batch["scenario_id"],
-                             batch["timesteps"][:, 0])
+           images = batch["data"][:, 0].to("cuda")  # (B, 3, 1080, 1920)
+           scores = model(images)                   # (B, 1080, 1920)
+           pixel_eval.update(scores, batch["scenario_id"], batch["timesteps"][:, 0])
 
    results = pixel_eval.compute()
-   # {'auroc': ..., 'aupr': ..., 'fpr95': ..., 'n_samples': ...,
-   #  'n_positive': ..., 'clamped_fraction': ...,
-   #  'scenario_macro': {...}, 'by_type': {...}}
 
-:class:`~carlanomaly.PointEvaluator` works the same way for LiDAR, taking a
-list of variable-length per-point score tensors per batch.
+Score maps must have the camera's full resolution, 1080 × 1920; upsample them
+if your model works on smaller images. They can stay on the GPU.
 
-Scores are accumulated in bounded-memory histograms.  AUROC/AUPR/FPR95 are
-rank-based, so the default ``asinh`` binning handles unbounded scores
-(MaxLogit, MSE, …) without tuning; ``clamped_fraction`` reports how many
-scores fell outside the histogram range (it should be ~0).  Pass
-``score_transform``/``score_range`` if your scores need a custom binning.
+The evaluator puts every pixel of the test split into one pool: anomalous
+pixels as positives, and all other pixels, from anomaly scenarios and normal
+scenarios alike, as negatives. A detector therefore cannot do well by giving
+high scores to a whole class of objects. If it flags every traffic light,
+the many normal traffic lights in normal scenarios count as false alarms. The
+anomaly types without masks contribute only negatives here.
 
-Sensor and timestep level
--------------------------
+For the LiDAR, :class:`~carlanomaly.PointEvaluator` takes one score per point,
+as a list with one tensor per item (point clouds differ in size):
 
-Reduce sample scores to one scalar per timestep — the benchmark baselines use
-a simple ``max`` — or let your model produce timestep scores directly.
-:class:`~carlanomaly.SensorEvaluator` scores a single sensor against
-sensor-specific visibility labels; :class:`~carlanomaly.TimestepEvaluator`
-scores the whole (possibly fused, multimodal) scene::
+.. code-block:: python
 
-   from carlanomaly import SensorEvaluator, TimestepEvaluator
+   from torch.utils.data import DataLoader
+   from carlanomaly import PointEvaluator
+   from carlanomaly.datasets import LiDARDataset, carlanomaly_collate_fn
 
-   sensor_eval = SensorEvaluator(sensor="front")
-   timestep_eval = TimestepEvaluator()
+   lidar = LiDARDataset("/data/carlanomaly", split="test")
+   loader = DataLoader(lidar, batch_size=8, collate_fn=carlanomaly_collate_fn)
+   point_eval = PointEvaluator()
 
    for batch in loader:
-       images = batch["data"][:, 0].to(device)            # (B, 3, H, W)
-       pixel_scores = model(images)                       # (B, H, W)
-       timestep_scores = pixel_scores.amax(dim=(1, 2))    # (B,) max-reduce
+       clouds = [clip[0] for clip in batch["points"]]  # B DataFrames
+       scores = [model(cloud) for cloud in clouds]     # B tensors of shape (N,)
+       point_eval.update(scores, batch["scenario_id"], batch["timesteps"][:, 0])
 
-       sensor_eval.update(timestep_scores, batch["scenario_id"],
-                          batch["timesteps"][:, 0])
-       timestep_eval.update(timestep_scores, batch["scenario_id"],
-                            batch["timesteps"][:, 0])
+The scores of a point cloud must be in the order of its rows.
 
-   print(sensor_eval.compute())    # {'auroc': ..., 'n_timesteps': ..., 'by_type': {...}}
-   print(timestep_eval.compute())
+Sensor level
+------------
 
-Both evaluators offer :meth:`to_dataframe` to export the raw
-``(scenario_id, timestep_id, score, label, anomaly_type, town)`` table for
-your own analysis or plots.
+At the sensor level your detector gives one score per sensor reading: does
+this camera image, or this point cloud, show an anomaly? A timestep counts as
+anomalous for a sensor while the anomaly is visible to that sensor: debris
+appearing ahead of the ego vehicle shows in the front camera, but usually not
+in the rear one.
+
+A detector that scores pixels gets a sensor score by reducing its score map,
+for example to its maximum:
+
+.. code-block:: python
+
+   from carlanomaly import SensorEvaluator
+
+   sensor_eval = SensorEvaluator(sensor="front")
+
+   for batch in loader:
+       pixel_scores = model(batch["data"][:, 0].to("cuda"))  # (B, 1080, 1920)
+       scores = pixel_scores.amax(dim=(1, 2))               # (B,)
+       sensor_eval.update(scores, batch["scenario_id"], batch["timesteps"][:, 0])
+
+``sensor`` is the camera or ``"lidar"``. Evaluate each sensor with its own
+evaluator.
+
+Timestep level
+--------------
+
+At the timestep level your detector gives one score per timestep for the
+whole scene. A timestep counts as anomalous while the anomaly is going on,
+whether or not a sensor shows it. This is the level for anomalies without a
+location, such as a sudden change of weather, and for detectors that combine
+several sensors or the vehicle data.
+
+A simple way to combine sensors is to bring their scores to a common scale
+and take the maximum:
+
+.. code-block:: python
+
+   from carlanomaly import TimestepEvaluator
+
+   timestep_eval = TimestepEvaluator()
+
+   # one batch of a CarlAnomalyDataset loader; mean and std estimated on the
+   # training split
+   camera_scores = camera_model(batch["front_rgb"][:, 0]).amax(dim=(1, 2))  # (B,)
+   lidar_scores = lidar_model(batch["points"])                              # (B,)
+   fused = torch.maximum((camera_scores - cam_mean) / cam_std,
+                         (lidar_scores - lidar_mean) / lidar_std)
+   timestep_eval.update(fused, batch["scenario_id"], batch["timesteps"][:, 0])
+
+With a single sensor, the timestep evaluator takes the same scores as the
+sensor evaluator; the two differ only in their labels.
+
+How quickly a detector notices an anomaly is a separate question from how
+well it ranks timesteps. :meth:`~carlanomaly.TimestepEvaluator.time_to_detection`
+answers it from the same scores, at a fixed false-alarm rate on the normal
+scenarios (see :ref:`time-to-detection`):
+
+.. code-block:: python
+
+   timestep_eval.time_to_detection(max_false_alarm_rate=0.01)
+   # {'ttd': 17.1, 'detection_rate': 0.16, 'false_alarm_rate': 0.009, ...}
 
 Scenario level
 --------------
 
-One scalar per scenario; the label is inferred from the scenario path.
-:meth:`max_per_scenario` reduces already-accumulated timestep scores for
-you::
+At the scenario level your detector gives one score per scenario: did
+anything anomalous happen in these 30 seconds? Scenarios under
+``test/anomaly`` count as anomalous, those under ``test/normal`` as normal.
+
+``update`` takes one scenario at a time. The simplest score is the highest
+timestep score, which :meth:`~carlanomaly.TimestepEvaluator.max_per_scenario`
+computes from what a timestep or sensor evaluator has collected:
+
+.. code-block:: python
 
    from carlanomaly import ScenarioEvaluator
 
@@ -152,29 +234,56 @@ you::
    for scenario_id, score in timestep_eval.max_per_scenario().items():
        scenario_eval.update(score, scenario_id)
 
-   print(scenario_eval.compute())  # {'auroc': ..., 'n_scenarios': ..., 'by_type': {...}}
+   results = scenario_eval.compute()
 
-Reading the results
--------------------
+A detector that looks at whole scenarios can pass its own scores instead.
 
-- ``auroc`` / ``aupr`` / ``fpr95`` — metrics pooled over everything the
-  evaluator has seen.  Evaluate the **full test split** (normal *and* anomaly
-  scenarios); otherwise the negatives are unrepresentative and the numbers are
-  not comparable to the benchmark.  Anomalies are the positive class, AUPR is
-  the trapezoidal area under the precision-recall curve, and FPR95 is the
-  false positive rate at the highest threshold that reaches 95% TPR.  Scores
-  may lie in any range; the metrics depend only on their order.
-- ``by_type`` — the same metric per anomaly type, each computed against all
-  normal data (sub-scenario levels report ``n_timesteps``; the scenario level
-  reports ``n_scenarios``).
-- ``scenario_macro`` (sample level only) — per-scenario metrics averaged over
-  scenarios that contain positives; a robustness diagnostic that weights every
-  anomalous scenario equally instead of by its number of pixels.
+.. _all-levels:
 
-The ground-truth labels behind each level are also available as datasets for
-inspection and custom analyses:
-:class:`~carlanomaly.datasets.AnomalySegmentationDataset` and
-:class:`~carlanomaly.datasets.AnomalyLiDARDataset` (sample),
-:class:`~carlanomaly.datasets.AnomalySensorDataset` (sensor),
-:class:`~carlanomaly.datasets.AnomalyTimestepDataset` (timestep), and
-:class:`~carlanomaly.datasets.AnomalyScenarioDataset` (scenario).
+All levels at once
+------------------
+
+One pass over the test split can feed all levels. This evaluates a detector
+that scores the pixels of the front camera:
+
+.. code-block:: python
+
+   import torch
+   from torch.utils.data import DataLoader
+   from carlanomaly import (PixelEvaluator, ScenarioEvaluator, SensorEvaluator,
+                            TimestepEvaluator)
+   from carlanomaly.datasets import RGBDataset, WithIdentifiers
+
+   test = WithIdentifiers(RGBDataset("/data/carlanomaly", split="test"))
+   loader = DataLoader(test, batch_size=8, num_workers=8)
+
+   pixel_eval = PixelEvaluator(sensor="front")
+   sensor_eval = SensorEvaluator(sensor="front")
+   timestep_eval = TimestepEvaluator()
+
+   with torch.no_grad():
+       for batch in loader:
+           ids, timesteps = batch["scenario_id"], batch["timesteps"][:, 0]
+           pixel_scores = model(batch["data"][:, 0].to("cuda"))  # (B, 1080, 1920)
+           frame_scores = pixel_scores.amax(dim=(1, 2))         # (B,)
+
+           pixel_eval.update(pixel_scores, ids, timesteps)
+           sensor_eval.update(frame_scores, ids, timesteps)
+           timestep_eval.update(frame_scores, ids, timesteps)
+
+   scenario_eval = ScenarioEvaluator()
+   for scenario_id, score in timestep_eval.max_per_scenario().items():
+       scenario_eval.update(score, scenario_id)
+
+   results = {
+       "sample": pixel_eval.compute(),
+       "sensor": sensor_eval.compute(),
+       "timestep": timestep_eval.compute(),
+       "scenario": scenario_eval.compute(),
+   }
+
+To analyse the scores yourself, for example to plot them over time,
+``to_dataframe()`` on the sensor, timestep and scenario evaluators returns
+every score with its label, anomaly type and town.
+
+Next, :doc:`metrics` explains the numbers in ``results``.

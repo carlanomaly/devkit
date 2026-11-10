@@ -11,14 +11,16 @@ from ._base import AtomicDataset, PathLike
 
 
 class DepthDataset(AtomicDataset):
-    """Per-timestep log-encoded depth maps from a single camera.
+    """Depth maps from one camera.
 
-    Returns a ``FloatTensor (T, 1, H, W)`` in ``[0, 1]`` (uint8 / 255).
+    Each item is a ``FloatTensor (T, 1, 1080, 1920)`` in ``[0, 1]``: the
+    distance along the camera's viewing axis in CARLA's logarithmic encoding,
+    stored with 8 bits. To convert it to metres::
 
-    Depth maps live in the ``depth`` part; it (plus the ``base`` part) is fetched
-    into ``root`` automatically; pass ``download=False`` to skip.  Remaining
-    keyword arguments (``clip_len``, ``stride``, ``parts``, ...) are forwarded to
-    :class:`~carlanomaly.index.ScenarioIndex`.
+        metres = 1000 * torch.exp(5.70378 * (depth - 1))
+
+    The encoding covers 3.3 m to 1000 m, with steps of about 2 % of the
+    distance.
     """
 
     modality = "depth"
@@ -31,7 +33,7 @@ class DepthDataset(AtomicDataset):
         *,
         transform: Optional[Callable] = None,
         index: Optional[ScenarioIndex] = None,
-        download: bool = True,
+        download: bool = False,
         **index_kwargs: Any,
     ) -> None:
         super().__init__(

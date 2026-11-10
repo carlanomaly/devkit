@@ -8,13 +8,20 @@ from ._base import AtomicDataset
 
 
 class PointCloudDataset(AtomicDataset):
-    """Per-timestep LiDAR point clouds.
+    """LiDAR point clouds.
 
-    Returns a ``List[pd.DataFrame]`` of length T.  Each DataFrame has
-    columns: x, y, z, cos_inc_angle, object_id, object_tag.
+    Each item is a list of ``T`` DataFrames, one per timestep, with one row per
+    point (about 100,000) and the columns
 
-    With ``download=True`` the ``lidar`` part (plus ``base``) is fetched
-    automatically.
+    - ``x``, ``y``, ``z``: position in metres in the sensor frame (x forward,
+      y left, z up); the LiDAR is mounted with the front camera;
+    - ``cos_inc_angle``: cosine of the angle at which the ray hits the surface;
+    - ``object_id``: the object the point belongs to, 0 for static map geometry;
+    - ``object_tag``: its semantic class, with the ids of
+      :class:`SegmentationDataset`.
+
+    Point clouds differ in size, so batch them with
+    :func:`carlanomaly_collate_fn`.
     """
 
     modality = "pointcloud"

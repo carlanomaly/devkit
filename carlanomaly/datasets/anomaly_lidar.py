@@ -9,14 +9,13 @@ from ._base import AtomicDataset
 
 
 class AnomalyLiDARDataset(AtomicDataset):
-    """Per-timestep, per-point LiDAR anomaly labels.
+    """Anomaly labels for the LiDAR points.
 
-    Returns a ``List[BoolTensor]`` of length T.  Each tensor has shape
-    ``(N_points,)`` matching the corresponding point cloud.  For the train
-    split, returns all-False tensors sized to match the actual point cloud.
+    Each item is a list of ``T`` ``BoolTensor (N,)``, one per point cloud,
+    ``True`` for points on the anomalous object. They follow the row order of
+    :class:`PointCloudDataset`. Without an anomaly, all points are ``False``.
 
-    With ``download=True`` the ``lidar`` part (plus ``base``) is fetched
-    automatically.
+    These are the labels :class:`~carlanomaly.PointEvaluator` uses.
     """
 
     modality = "anomaly_lidar"

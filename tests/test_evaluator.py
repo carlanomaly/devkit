@@ -17,6 +17,7 @@ from carlanomaly.evaluator import (
     PointEvaluator,
     ScenarioEvaluator,
     SensorEvaluator,
+    TimestepEvaluator,
     _bin_indices,
     _pooled_metrics,
     _resolve_binning,
@@ -64,12 +65,14 @@ def test_pooled_matches_exact(seed):
 
     ood_labels = _ood_labels(labels)
     ref_auroc = ood_metrics.auroc(scores, ood_labels).item()
-    ref_ap = ood_metrics.aupr(scores, ood_labels, positive="ood").item()
+    ref_aupr = ood_metrics.aupr(scores, ood_labels, positive="ood").item()
+    ref_ap = ood_metrics.average_precision(scores, ood_labels, positive="ood").item()
     ref_fpr = ood_metrics.fpr_at_tpr(scores, ood_labels, tpr=0.95).item()
 
     # 65536 asinh bins => agreement well below 1e-3.
     assert m["auroc"] == pytest.approx(ref_auroc, abs=1e-3)
-    assert m["aupr"] == pytest.approx(ref_ap, abs=1e-3)
+    assert m["aupr"] == pytest.approx(ref_aupr, abs=1e-3)
+    assert m["ap"] == pytest.approx(ref_ap, abs=1e-3)
     assert m["fpr95"] == pytest.approx(ref_fpr, abs=1e-3)
 
 
@@ -81,6 +84,7 @@ def test_pooled_perfect_and_chance():
     m = _pooled_metrics(pos, neg)
     assert m["auroc"] == pytest.approx(1.0, abs=1e-3)
     assert m["aupr"] == pytest.approx(1.0, abs=1e-3)
+    assert m["ap"] == pytest.approx(1.0, abs=1e-3)
     assert m["fpr95"] == pytest.approx(0.0, abs=1e-3)
 
 
@@ -94,6 +98,7 @@ def test_pooled_transform_invariance():
     ma, mb = _pooled_metrics(pos_a, neg_a), _pooled_metrics(pos_b, neg_b)
     assert ma["auroc"] == pytest.approx(mb["auroc"], abs=2e-3)
     assert ma["aupr"] == pytest.approx(mb["aupr"], abs=2e-3)
+    assert ma["ap"] == pytest.approx(mb["ap"], abs=2e-3)
 
 
 def test_clamping_flagged_when_range_too_narrow():
@@ -110,7 +115,33 @@ def test_pooled_degenerate_single_class_is_nan():
     pos = torch.zeros(16, dtype=torch.int64)
     neg = torch.ones(16, dtype=torch.int64)
     m = _pooled_metrics(pos, neg)
-    assert all(np.isnan(m[k]) for k in ("auroc", "aupr", "fpr95"))
+    assert all(np.isnan(m[k]) for k in ("auroc", "aupr", "ap", "fpr95"))
+
+
+@pytest.mark.parametrize(
+    "name", ["constant", "binary"],
+)
+def test_pooled_ties_ap_vs_aupr(name):
+    """Regression: each bin is a block of tied scores, which the trapezoidal AUPR
+    rewards (a constant score gets (1 + pi) / 2) and the step-wise AP does not
+    (it gets pi). Both must equal pytorch-ood's exact values on the raw scores."""
+    g = torch.Generator().manual_seed(0)
+    labels = (torch.rand(20_000, generator=g) < 0.1).long()
+    if name == "constant":
+        scores = torch.zeros(20_000)
+    else:  # uninformative indicator that fires on 99% of the samples
+        scores = (torch.rand(20_000, generator=g) < 0.99).float()
+    pos, neg, _ = _histograms(scores, labels, score_range=(0.0, 1.0))
+    m = _pooled_metrics(pos, neg)
+
+    pi = labels.float().mean().item()
+    ood_labels = _ood_labels(labels)
+    assert m["aupr"] == pytest.approx(ood_metrics.aupr(scores, ood_labels).item(), abs=1e-9)
+    assert m["ap"] == pytest.approx(
+        ood_metrics.average_precision(scores, ood_labels).item(), abs=1e-9
+    )
+    assert m["ap"] == pytest.approx(pi, abs=1e-3)
+    assert m["aupr"] == pytest.approx((1 + pi) / 2, abs=5e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -229,11 +260,36 @@ def test_scenario_evaluator_label_from_path():
     res = ev.compute()
     assert res["n_scenarios"] == 4
     assert res["auroc"] == pytest.approx(1.0)
-    # Perfect separation: AUPR is 1.0 and FPR95 is 0.0 too.
+    # Perfect separation: AUPR and AP are 1.0 and FPR95 is 0.0 too.
     assert res["aupr"] == pytest.approx(1.0)
+    assert res["ap"] == pytest.approx(1.0)
     assert res["fpr95"] == pytest.approx(0.0)
     assert res["by_type"]["broken_light"]["n_scenarios"] == 2
     assert res["by_type"]["broken_light"]["aupr"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("root", ["/data", "data", ".", ""])
+def test_scenario_evaluator_relative_root(root):
+    """Scenario ids are paths under the dataset root, which may be relative:
+    with root "." they start with "test/..." and have no leading slash."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    def sid(*parts):
+        return str(Path(root, *parts))
+
+    ev = ScenarioEvaluator()
+    ev.update(0.9, sid("test", "anomaly", "Town01", "spawn-props", "scenario-1"))
+    ev.update(0.1, sid("test", "normal", "Town02", "scenario-1"))
+    res = ev.compute()
+    assert res["auroc"] == pytest.approx(1.0)
+    assert list(res["by_type"]) == ["spawn-props"]
+    df = ev.to_dataframe()
+    assert df["label"].tolist() == [True, False]
+    assert df["anomaly_type"].iloc[0] == "spawn-props"
+    assert pd.isna(df["anomaly_type"].iloc[1])  # normal scenario: no type
+    assert df["town"].tolist() == ["Town01", "Town02"]
 
 
 def test_sensor_evaluator_auroc(monkeypatch):
@@ -278,6 +334,19 @@ def test_scenario_evaluator_large_scores_not_saturated():
     assert res["fpr95"] == pytest.approx(0.0)
 
 
+def test_scenario_evaluator_constant_score_ap_is_base_rate():
+    """Tied scores: AP is the fraction of positives, the trapezoidal AUPR (1 + pi) / 2."""
+    ev = ScenarioEvaluator()
+    for i in range(2):
+        ev.update(1.0, f"/data/test/anomaly/Town01/broken_light/{i:04d}")
+    for i in range(8):
+        ev.update(1.0, f"/data/test/normal/Town01/{i:04d}")
+    res = ev.compute()
+    assert res["auroc"] == pytest.approx(0.5)
+    assert res["ap"] == pytest.approx(0.2)
+    assert res["aupr"] == pytest.approx(0.6)
+
+
 @pytest.mark.parametrize(
     "shift, scale", [(0.0, 1.0), (1e3, 1.0), (0.0, -1e-9), (0.0, 1e6)]
 )
@@ -301,5 +370,73 @@ def test_timestep_metrics_invariant_to_score_range(monkeypatch, shift, scale):
 
     ref = run(raw if scale > 0 else -raw)
     res = run(raw * scale + shift)
-    for k in ("auroc", "aupr", "fpr95"):
+    for k in ("auroc", "aupr", "ap", "fpr95"):
         assert res[k] == pytest.approx(ref[k], abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Time to detection
+# ---------------------------------------------------------------------------
+
+
+def _ttd_evaluator(monkeypatch, normal_maxima, anomalies):
+    """A TimestepEvaluator with one-timestep normal scenarios scoring ``normal_maxima``,
+    and anomaly scenarios given as ``{scenario_id: (labels, scores)}``."""
+    ev = TimestepEvaluator()
+    label_arrays = {sid: np.asarray(labels, dtype=bool) for sid, (labels, _) in anomalies.items()}
+    for i, m in enumerate(normal_maxima):
+        label_arrays[f"/data/test/normal/Town01/{i:04d}"] = np.zeros(1, dtype=bool)
+    monkeypatch.setattr(ev, "_labels_for_scenario", lambda sid: label_arrays[sid])
+    for i, m in enumerate(normal_maxima):
+        ev.update([m], [f"/data/test/normal/Town01/{i:04d}"], [0])
+    for sid, (_, scores) in anomalies.items():
+        ev.update(scores, [sid] * len(scores), list(range(len(scores))))
+    return ev
+
+
+def test_time_to_detection(monkeypatch):
+    onset_5 = [False] * 5 + [True] * 5
+    anomalies = {
+        # Alarm before the onset is ignored; the first alarm after it is at timestep 7.
+        "/data/test/anomaly/Town01/spawn-props/0000": (onset_5, [0, 0, 0.9, 0, 0, 0.2, 0.3, 0.5, 0.9, 0]),
+        # Never above the threshold: the delay runs to the last timestep, 9.
+        "/data/test/anomaly/Town01/change-weather/0000": ([False] * 3 + [True] * 7, [0.3] * 10),
+        # Labels never anomalous: left out.
+        "/data/test/anomaly/Town01/change-weather/0001": ([False] * 10, [0.9] * 10),
+    }
+    ev = _ttd_evaluator(monkeypatch, [0.1, 0.2, 0.3, 0.9], anomalies)
+    res = ev.time_to_detection(max_false_alarm_rate=0.25)
+    assert res["threshold"] == pytest.approx(0.3)  # one of four normals may exceed it
+    assert res["false_alarm_rate"] == pytest.approx(0.25)
+    assert res["n_scenarios"] == 2
+    assert res["n_normal_scenarios"] == 4
+    assert res["detection_rate"] == pytest.approx(0.5)
+    assert res["ttd"] == pytest.approx((0.2 + 0.6) / 2)
+    assert res["by_type"]["spawn-props"] == {"ttd": pytest.approx(0.2), "detection_rate": 1.0, "n_scenarios": 1}
+    assert res["by_type"]["change-weather"]["n_scenarios"] == 1
+
+    # With no false alarms allowed, the threshold is the highest normal score.
+    res = ev.time_to_detection(max_false_alarm_rate=0.0)
+    assert res["threshold"] == pytest.approx(0.9)
+    assert res["false_alarm_rate"] == 0.0
+    assert res["detection_rate"] == 0.0
+
+
+def test_time_to_detection_ties_never_alarm(monkeypatch):
+    """Regression: a detector whose top score is shared by many normal scenarios
+    (saturated or binary scores) must not get detections from the tie, which with
+    ``>=`` came at a false-alarm rate far above the requested one."""
+    anomalies = {"/data/test/anomaly/Town01/spawn-props/0000": ([False, True, True], [0.0, 1.0, 1.0])}
+    ev = _ttd_evaluator(monkeypatch, [1.0, 1.0, 1.0, 0.5], anomalies)
+    res = ev.time_to_detection(max_false_alarm_rate=0.25)
+    assert res["threshold"] == 1.0
+    assert res["false_alarm_rate"] == 0.0
+    assert res["detection_rate"] == 0.0
+    assert res["ttd"] == pytest.approx(0.1)  # a miss: onset 1 to the last timestep 2
+
+
+def test_time_to_detection_needs_normal_scenarios(monkeypatch):
+    anomalies = {"/data/test/anomaly/Town01/spawn-props/0000": ([False, True], [0.0, 1.0])}
+    ev = _ttd_evaluator(monkeypatch, [], anomalies)
+    with pytest.raises(ValueError, match="normal scenarios"):
+        ev.time_to_detection()

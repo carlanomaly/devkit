@@ -1,8 +1,9 @@
-"""Tests for automatic archive-part selection when ``download=True``.
+"""Tests for archive-part selection, detection and the missing-data error.
 
-No network or disk access: :func:`carlanomaly.download.ensure_parts` is replaced
-with a recorder and scenario discovery is stubbed, so we only check that each
-dataset asks for the correct parts.
+No network access: :func:`carlanomaly.download.ensure_parts` is replaced with a
+recorder and scenario discovery is stubbed, so the wiring tests only check that
+each dataset asks for the correct parts.  The detection tests build a tiny fake
+dataset layout under ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -131,15 +132,21 @@ def test_explicit_parts_override_auto_selection(record_download):
     assert record_download[0]["parts"] == ["base"]
 
 
-def test_no_download_means_no_fetch(record_download):
-    RGBDataset(root="/data", split="train", direction="left", download=False)
+def test_download_is_off_by_default(record_download):
+    # Nothing on disk and no download=True: nothing is fetched, and the error
+    # names the missing parts and the command that fetches them.
+    with pytest.raises(FileNotFoundError) as err:
+        RGBDataset(root="/data", split="train", direction="left")
     assert record_download == []
+    msg = str(err.value)
+    assert "base (train), camera-extended (train)" in msg
+    assert "carlanomaly-download --root /data --parts base camera-extended --splits train" in msg
 
 
-def test_download_is_on_by_default(record_download):
-    # No explicit download= — constructing the dataset should fetch its parts.
-    RGBDataset(root="/data", split="train", direction="left")
-    assert record_download[0]["parts"] == ["base", "camera-extended"]
+def test_composite_without_download_checks_its_parts(record_download):
+    with pytest.raises(FileNotFoundError, match="lidar"):
+        LiDARDataset(root="/data", split="test")
+    assert record_download == []
 
 
 def test_shared_index_dataset_downloads_its_modality_part(record_download):
@@ -147,7 +154,7 @@ def test_shared_index_dataset_downloads_its_modality_part(record_download):
     # (the index's discovery only needs `base`).
     idx = ScenarioIndex(root="/data", split="train", download=False)
     record_download.clear()
-    PointCloudDataset(index=idx)
+    PointCloudDataset(index=idx, download=True)
     assert record_download[0]["parts"] == ["base", "lidar"]
     assert record_download[0]["splits"] == ("train",)
     assert record_download[0]["root"] == Path("/data")
@@ -171,3 +178,113 @@ def test_joint_composite_downloads_everything(record_download):
 def test_joint_front_only_skips_camera_extended(record_download):
     CarlAnomalyDataset(root="/data", split="train", cameras=["front"], download=True)
     assert record_download[0]["parts"] == ["base", "depth", "lidar"]
+
+
+# ---------------------------------------------------------------------------
+# Detection of parts that were extracted by hand (no marker file)
+# ---------------------------------------------------------------------------
+
+
+def _fake_layout(root: Path, dirs: list, scenarios: int = 2) -> None:
+    """train/Town01/scenario-<i>/<dir>/000000.jpg for every scenario and dir."""
+    for i in range(scenarios):
+        for d in dirs:
+            (root / "train" / "Town01" / f"scenario-{i}" / d).mkdir(parents=True)
+            (root / "train" / "Town01" / f"scenario-{i}" / d / "000000.jpg").touch()
+
+
+def test_part_present_from_directories(tmp_path):
+    _fake_layout(tmp_path, ["rgb-front", "pointclouds"])
+    assert dl.part_present(tmp_path, "base", "train")
+    assert dl.part_present(tmp_path, "lidar", "train")
+    assert not dl.part_present(tmp_path, "depth", "train")
+    assert not dl.part_present(tmp_path, "base", "test")
+
+
+def test_part_present_requires_every_scenario(tmp_path):
+    # an interrupted manual extraction of the lidar archive
+    _fake_layout(tmp_path, ["rgb-front"])
+    (tmp_path / "train" / "Town01" / "scenario-0" / "pointclouds").mkdir()
+    assert not dl.part_present(tmp_path, "lidar", "train")
+
+
+def test_part_present_from_marker(tmp_path):
+    marker = tmp_path / dl.DOWNLOAD_SUBDIR / "depth-test.done"
+    marker.parent.mkdir()
+    marker.touch()
+    assert dl.part_present(tmp_path, "depth", "test")
+
+
+def test_ensure_parts_skips_parts_found_on_disk(tmp_path, monkeypatch):
+    _fake_layout(tmp_path, ["rgb-front"])
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("must not download a part that is already extracted")
+
+    monkeypatch.setattr(dl, "_download", no_network)
+    dl.ensure_parts(tmp_path, "base", "train")
+    assert (tmp_path / dl.DOWNLOAD_SUBDIR / "base-train.done").exists()
+
+
+def test_dataset_without_download_loads_extracted_data(tmp_path):
+    _fake_layout(tmp_path, ["rgb-front"])
+    ds = RGBDataset(tmp_path, split="train")
+    assert len(ds.index.records) == 2
+
+
+def test_empty_index_names_the_missing_base_part(tmp_path):
+    with pytest.raises(FileNotFoundError, match=r"base \(test\)"):
+        ScenarioIndex(tmp_path, split="test_normal")
+
+
+# ---------------------------------------------------------------------------
+# _safe_extract — the dataset LICENSE shipped in every archive
+# ---------------------------------------------------------------------------
+
+
+def _archive_with_license(path: Path, license_text: str = "CC BY 4.0") -> Path:
+    """A part archive like the published ones: LICENSE first, then dataset files."""
+    import io
+    import tarfile
+
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in [
+            ("LICENSE", license_text.encode()),
+            ("train/Town01/scenario-0/rgb-front/000000.jpg", b"jpg"),
+        ]:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return path
+
+
+@pytest.fixture(params=["data_filter", "manual_check"])
+def extract_path(request, monkeypatch):
+    """Run each test with the tarfile data filter and with the fallback for Pythons without it."""
+    import tarfile
+
+    if request.param == "manual_check":
+        monkeypatch.delattr(tarfile, "data_filter")
+    return request.param
+
+
+def test_extract_writes_license_into_empty_root(tmp_path, extract_path):
+    archive = _archive_with_license(tmp_path / "part.tar.gz")
+    root = tmp_path / "data"
+    root.mkdir()
+    dl._safe_extract(archive, root)
+    assert (root / "LICENSE").read_text() == "CC BY 4.0"
+    assert (root / "train/Town01/scenario-0/rgb-front/000000.jpg").exists()
+
+
+def test_extract_keeps_existing_license(tmp_path, extract_path):
+    # a LICENSE that cannot be overwritten, e.g. created by another user in a
+    # shared dataset directory, must not stop the part from extracting
+    archive = _archive_with_license(tmp_path / "part.tar.gz", "new text")
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "LICENSE").write_text("from an earlier part")
+    (root / "LICENSE").chmod(0o444)
+    dl._safe_extract(archive, root)
+    assert (root / "LICENSE").read_text() == "from an earlier part"
+    assert (root / "train/Town01/scenario-0/rgb-front/000000.jpg").exists()
