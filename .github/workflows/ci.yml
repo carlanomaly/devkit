@@ -25,8 +25,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install CPU-only PyTorch
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install CPU-only PyTorch + torchvision
+        # torchvision (pulled in by pytorch-ood) must come from the same CPU index:
+        # the PyPI wheel is a CUDA build and fails on CPU torch ("torchvision::nms
+        # does not exist").
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install package (with test extras)
         run: pip install -e '.[test]'
@@ -45,8 +48,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install CPU-only PyTorch
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install CPU-only PyTorch + torchvision
+        # torchvision (pulled in by pytorch-ood) must come from the same CPU index:
+        # the PyPI wheel is a CUDA build and fails on CPU torch ("torchvision::nms
+        # does not exist").
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install package (with docs extras)
         run: pip install -e '.[docs]'
